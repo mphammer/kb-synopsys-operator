@@ -1,0 +1,7 @@
+version: "2"
+domain: synopsys.com
+repo: github.com/yashbhutwala/kb-alert-controller
+resources:
+- group: alerts
+  version: v1
+  kind: Alert

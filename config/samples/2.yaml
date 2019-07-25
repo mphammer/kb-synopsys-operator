@@ -1,0 +1,14 @@
+apiVersion: alerts.synopsys.com/v1
+kind: Alert
+metadata:
+  name: alert-sample
+spec:
+  # Add fields here
+  yamlConfig: |
+    {
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": "demo"
+        }
+    }
