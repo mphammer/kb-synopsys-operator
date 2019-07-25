@@ -19,6 +19,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
+
 	//"reflect"
 
 	//"regexp"
@@ -124,6 +126,52 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		return ctrl.Result{}, ignoreNotFound(err)
 	}
 
+	var childConfigMapList corev1.ConfigMapList
+	if err := r.List(ctx, &childConfigMapList, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
+		log.Error(err, "unable to list childConfigMapList")
+		return ctrl.Result{}, err
+	}
+
+	var childServiceList corev1.ServiceList
+	if err := r.List(ctx, &childServiceList, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
+		log.Error(err, "unable to list childServiceList")
+		return ctrl.Result{}, err
+	}
+
+	var childReplicationControllerList corev1.ReplicationControllerList
+	if err := r.List(ctx, &childReplicationControllerList, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
+		log.Error(err, "unable to list childReplicationControllerList")
+		return ctrl.Result{}, err
+	}
+
+	var childSecretList corev1.SecretList
+	if err := r.List(ctx, &childSecretList, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
+		log.Error(err, "unable to list childSecretList")
+		return ctrl.Result{}, err
+	}
+
+	//var staged map[string][]runtime.Object
+	//for _, currRunTimeObj := range childJobs {
+	//	switch currRunTimeObj.(type) {
+	//	case *corev1.ConfigMap:
+	//		staged["STAGE 1"] = append(staged["STAGE 1"], currRunTimeObj)
+	//		continue
+	//	}
+	//
+	//	accessor := meta.NewAccessor()
+	//	labels, _ := accessor.Labels(currRunTimeObj)
+	//
+	//	switch strings.TrimSpace(labels["component"]) {
+	//	case "cfssl":
+	//		staged["STAGE 2"] = append(staged["STAGE 2"], currRunTimeObj)
+	//	case "alert":
+	//		staged["STAGE 3"] = append(staged["STAGE 3"], currRunTimeObj)
+	//
+	//	default:
+	//		staged["STAGE 4"] = append(staged["STAGE 4"], currRunTimeObj)
+	//	}
+	//}
+
 	yamlConfig := alert.Spec.YamlConfig
 	log.V(1).Info("Got the yamlConfig", "job", yamlConfig)
 
@@ -133,19 +181,26 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	// STAGE 1: configMap
 	fmt.Println("STAGE 1 I CHOOSE YOU!")
 	count := 0
-	for _, runtimeObj := range arrOfRuntimeObjs {
-		// Set an owner reference
-		if err := ctrl.SetControllerReference(&alert, runtimeObj.(metav1.Object), r.Scheme); err != nil {
-			return ctrl.Result{}, nil
-		}
 
+	for _, runtimeObj := range arrOfRuntimeObjs {
 		switch runtimeObj.(type) {
 		case *corev1.ConfigMap:
+			// Set an owner reference
+			if err := ctrl.SetControllerReference(&alert, runtimeObj.(metav1.Object), r.Scheme); err != nil {
+				return ctrl.Result{}, nil
+			}
 			_, err := ctrl.CreateOrUpdate(ctx, r.Client, runtimeObj, func() error {
 				return nil
 			})
 			if err != nil {
-				log.Error(err, "unable to create runtimeObj", "runtimeObj", runtimeObj)
+				// TODO: delete everything in stages 2, 3, 4 ... and requeue
+				log.Error(err, "unable to get past STAGE 1, deleting all child Objects", "runtimeObj", runtimeObj)
+				for _, item := range childConfigMapList.Items {
+					r.Client.Delete(ctx, item)
+				}
+				//for _, item := range append(staged["STAGE 2"], append(staged["STAGE 3"], staged["STAGE 4"]...)...) {
+				//	r.Delete(ctx, item)
+				//}
 				return ctrl.Result{}, err
 			}
 			arrOfRuntimeObjs = append(arrOfRuntimeObjs[:count], arrOfRuntimeObjs[count+1:]...)
@@ -158,10 +213,6 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	fmt.Println("STAGE 2 Deploy!")
 	count = 0
 	for _, runtimeObj := range arrOfRuntimeObjs {
-		// Set an owner reference
-		if err := ctrl.SetControllerReference(&alert, runtimeObj.(metav1.Object), r.Scheme); err != nil {
-			return ctrl.Result{}, nil
-		}
 
 		accessor := meta.NewAccessor()
 		labels, _ := accessor.Labels(runtimeObj)
@@ -170,12 +221,54 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 
 		switch strings.TrimSpace(labels["component"]) {
 		case "cfssl":
-			log.V(1).Info("About to make some dope K8s runtime object", "runtimeObj", runtimeObj)
+			// Set an owner reference
+			if err := ctrl.SetControllerReference(&alert, runtimeObj.(metav1.Object), r.Scheme); err != nil {
+				return ctrl.Result{}, nil
+			}
+
+			log.V(1).Info("Stage 2, deploying cfssl labeled resources", "runtimeObj", runtimeObj)
 			_, err := ctrl.CreateOrUpdate(ctx, r.Client, runtimeObj, func() error {
 				return nil
 			})
 			if err != nil {
-				log.Error(err, "unable to create runtimeObj", "runtimeObj", runtimeObj)
+				// Delete dependent objects and requeue
+				log.Error(err, "unable to get past STAGE 2, deleting all Objects after Stage 2", "runtimeObj", runtimeObj)
+				//for _, item := range childReplicationControllerList.Items {
+				//	labels, _ := accessor.Labels(item)
+				//	switch strings.TrimSpace(labels["component"]) {
+				//	case "cfssl":
+				//		continue
+				//	case "alert":
+				//		r.Delete(ctx, item)
+				//	default:
+				//		r.Delete(ctx, item)
+				//	}
+				//}
+				//
+				//for _, item := range childServiceList.Items {
+				//	labels, _ := accessor.Labels(item)
+				//	switch strings.TrimSpace(labels["component"]) {
+				//	case "cfssl":
+				//		continue
+				//	case "alert":
+				//		r.Delete(ctx, item)
+				//	default:
+				//		r.Delete(ctx, item)
+				//	}
+				//}
+				//
+				//for _, item := range childSecretList.Items {
+				//	labels, _ := accessor.Labels(item)
+				//	switch strings.TrimSpace(labels["component"]) {
+				//	case "cfssl":
+				//		continue
+				//	case "alert":
+				//		r.Delete(ctx, item)
+				//	default:
+				//		r.Delete(ctx, item)
+				//	}
+				//}
+
 				return ctrl.Result{}, err
 			}
 			arrOfRuntimeObjs = append(arrOfRuntimeObjs[:count], arrOfRuntimeObjs[count+1:]...)
@@ -188,10 +281,6 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	fmt.Println("STAGE 3 Get in here!")
 	count = 0
 	for _, runtimeObj := range arrOfRuntimeObjs {
-		// Set an owner reference
-		if err := ctrl.SetControllerReference(&alert, runtimeObj.(metav1.Object), r.Scheme); err != nil {
-			return ctrl.Result{}, nil
-		}
 
 		accessor := meta.NewAccessor()
 		labels, _ := accessor.Labels(runtimeObj)
@@ -199,13 +288,60 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		fmt.Printf("labels[app]: %+v \n", labels["component"])
 
 		switch strings.TrimSpace(labels["component"]) {
+
 		case "alert":
+			// Set an owner reference
+			if err := ctrl.SetControllerReference(&alert, runtimeObj.(metav1.Object), r.Scheme); err != nil {
+				return ctrl.Result{}, nil
+			}
+
 			log.V(1).Info("About to make some dope K8s runtime object", "runtimeObj", runtimeObj)
 			_, err := ctrl.CreateOrUpdate(ctx, r.Client, runtimeObj, func() error {
 				return nil
 			})
 			if err != nil {
 				log.Error(err, "unable to create runtimeObj", "runtimeObj", runtimeObj)
+
+				//for _, item := range childReplicationControllerList.Items {
+				//	labels, _ := accessor.Labels(item)
+				//	switch strings.TrimSpace(labels["component"]) {
+				//	case "cfssl":
+				//		r.Delete(ctx, item)
+				//	case "alert":
+				//		continue
+				//	default:
+				//		r.Delete(ctx, item)
+				//	}
+				//}
+				//
+				//for _, item := range childServiceList.Items {
+				//	labels, _ := accessor.Labels(item)
+				//	switch strings.TrimSpace(labels["component"]) {
+				//	case "cfssl":
+				//		r.Delete(ctx, item)
+				//	case "alert":
+				//		continue
+				//	default:
+				//		r.Delete(ctx, item)
+				//	}
+				//}
+				//
+				//for _, item := range childSecretList.Items {
+				//	labels, _ := accessor.Labels(item)
+				//	switch strings.TrimSpace(labels["component"]) {
+				//	case "cfssl":
+				//		r.Delete(ctx, item)
+				//	case "alert":
+				//		continue
+				//	default:
+				//		r.Client.Delete(ctx, item)
+				//		r.Delete(ctx, item)
+				//	}
+				//}
+
+				//for _, item := range staged["STAGE 4"] {
+				//	r.Delete(ctx, item)
+				//}
 				return ctrl.Result{}, err
 			}
 			arrOfRuntimeObjs = append(arrOfRuntimeObjs[:count], arrOfRuntimeObjs[count+1:]...)
@@ -234,80 +370,7 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		// TODO: do a cleanup of the remaining resources
 	}
 
-	//2a: list all child jobs in this namespace that belong to this Alert
-	//var childConfigMapList corev1.ConfigMapList
-	//if err := r.List(ctx, &childConfigMapList, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
-	//	log.Error(err, "unable to list child Jobs")
-	//	return ctrl.Result{}, err
-	//}
-
-	//for _, configMap := range desiredConfigMapList.Items {
-	//	log.V(1).Info("About to make some dope K8s runtime object", "runtimeObj", configMap)
-	//
-	//	ctrl.CreateOrUpdate(ctx, r.Client, configMap, func() error {
-	//		return nil
-	//	})
-	//}
-
-	//var childServiceList corev1.ServiceList
-	//if err := r.List(ctx, &childConfigMaps, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
-	//	log.Error(err, "unable to list child Jobs")
-	//	return ctrl.Result{}, err
-	//}
-
-	//for i, runtimeObj := range arrOfRuntimeObjs {
-	//	//fmt.Printf(" inside the loop runtimeObj: %+v\n", runtimeObj)
-	//	//fmt.Printf(" inside the loop runtimeObj: %+v\n", runtimeObj.(type))
-	//	switch runtimeObj.(type) {
-	//	case *corev1.ConfigMap:
-	//		log.V(1).Info("About to make some dope K8s runtime object", "runtimeObj", runtimeObj)
-	//
-	//		//accessor, _ := conversion.EnforcePtr(runtimeObj)
-	//		//var metav1Object = accessor.FieldByName("ObjectMeta")
-	//		//
-	//		//// Set an owner reference
-	//		//if err := ctrl.SetControllerReference(accessor, metav1Object, r.Scheme); err != nil {
-	//		//	fmt.Printf("I FAILED TO SET OWNER REFERENCE %+v \n", runtimeObjAccessor)
-	//		//	return ctrl.Result{}, nil
-	//		//}
-	//
-	//		//alertAccessor, _ := meta.Accessor(alert)
-	//		//fmt.Printf("alertAccessor: %+v\n", alertAccessor)
-	//		//runtimeObjAccessor, _ := meta.Accessor(runtimeObj)
-	//		//fmt.Printf("runtimeObjAccessor: %+v\n", runtimeObjAccessor)
-	//
-	//		// alert.DeepCopyObject().(metav1.Object)
-	//
-	//		//fmt.Printf("alert before: %+v\n", alert)
-	//
-	//		//pod.OwnerReferences = append(pod.OwnerReferences, metav1.OwnerReference{alert.Gr})
-	//
-	//		//fmt.Printf("printing Alert CR: %+v", alert)
-	//
-	//		// Set an owner reference
-	//		if err := ctrl.SetControllerReference(&alert, runtimeObj.(metav1.Object), r.Scheme); err != nil {
-	//			return ctrl.Result{}, nil
-	//		}
-	//
-	//		//var ns corev1.Namespace
-	//		//var s conversion.Scope
-	//		//
-	//		//_ = runtime.Convert_runtime_Object_To_runtime_RawExtension(&runtimeObj, &ns, s)
-	//
-	//		//ns, _ := runtime.ObjectCreater(runtimeObj)
-	//
-	//		//ns := runtimeObj.(*corev1.Namespace)
-	//
-	//		if err := r.Create(ctx, runtimeObj); err != nil {
-	//			log.Error(err, "unable to create runtimeObj", "runtimeObj", runtimeObj)
-	//			return ctrl.Result{}, err
-	//		}
-	//
-	//		arrOfRuntimeObjs = append(arrOfRuntimeObjs[:i], arrOfRuntimeObjs[i+1:]...)
-	//	}
-	//}
-
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
 //func setIndexing(mgr ctrl.Manager, ro metav1.Object) error {
