@@ -22,7 +22,7 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	alertsv1 "github.com/yashbhutwala/kb-alert-controller/api/v1"
+	alertsv1 "github.com/yashbhutwala/kb-synopsys-operator/api/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"

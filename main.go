@@ -19,8 +19,8 @@ import (
 	"flag"
 	"os"
 
-	alertsv1 "github.com/yashbhutwala/kb-alert-controller/api/v1"
-	"github.com/yashbhutwala/kb-alert-controller/controllers"
+	alertsv1 "github.com/yashbhutwala/kb-synopsys-operator/api/v1"
+	"github.com/yashbhutwala/kb-synopsys-operator/controllers"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"

@@ -1,6 +1,6 @@
 version: "2"
 domain: synopsys.com
-repo: github.com/yashbhutwala/kb-alert-controller
+repo: github.com/yashbhutwala/kb-synopsys-operator
 resources:
 - group: alerts
   version: v1

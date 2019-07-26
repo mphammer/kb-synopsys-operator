@@ -43,7 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	// controller specific imports
-	alertsv1 "github.com/yashbhutwala/kb-alert-controller/api/v1"
+	alertsv1 "github.com/yashbhutwala/kb-synopsys-operator/api/v1"
 )
 
 // AlertReconciler reconciles a Alert object
@@ -90,10 +90,14 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	log.V(1).Info("Parsed the yaml into K8s runtime object", "mapOfKindToDesiredRuntimeObject", mapOfKindToDesiredRuntimeObject, "mapOfComponentLabelToDesiredRuntimeObject", mapOfComponentLabelToDesiredRuntimeObject)
 
 	// TODO: potentially this is what convertYamlFileToRuntimeObjects returns
-	var mapOfKindToMapOfNameToDesiredRuntimeObject map[string]map[string]runtime.Object
+	mapOfKindToMapOfNameToDesiredRuntimeObject := make(map[string]map[string]runtime.Object, len(mapOfKindToDesiredRuntimeObject))
 	for kind, listOfRuntimeObjects := range mapOfKindToDesiredRuntimeObject {
 		for _, item := range listOfRuntimeObjects {
 			key := item.(metav1.Object).GetName()
+			// weird golang thing, have to initialize the nested map if it doesn't exist
+			if _, ok := mapOfKindToMapOfNameToDesiredRuntimeObject[kind]; !ok {
+				mapOfKindToMapOfNameToDesiredRuntimeObject[kind] = make(map[string]runtime.Object, 0)
+			}
 			mapOfKindToMapOfNameToDesiredRuntimeObject[kind][key] = item
 		}
 	}
@@ -102,7 +106,7 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	var listOfCurrentRuntimeObjectsOwnedByAlertCr metav1.List
 	if err := r.List(ctx, &listOfCurrentRuntimeObjectsOwnedByAlertCr, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
 		log.Error(err, "unable to list currentRuntimeObjectsOwnedByAlertCr")
-		return ctrl.Result{}, err
+		return ctrl.Result{}, nil
 	}
 
 	// If any of the current objects are not in the desired objects, delete them

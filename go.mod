@@ -1,4 +1,4 @@
-module github.com/yashbhutwala/kb-alert-controller
+module github.com/yashbhutwala/kb-synopsys-operator
 
 go 1.12
 
