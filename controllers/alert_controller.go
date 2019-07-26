@@ -106,7 +106,8 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	var listOfCurrentRuntimeObjectsOwnedByAlertCr metav1.List
 	if err := r.List(ctx, &listOfCurrentRuntimeObjectsOwnedByAlertCr, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
 		log.Error(err, "unable to list currentRuntimeObjectsOwnedByAlertCr")
-		return ctrl.Result{}, nil
+		//TODO: redo
+		//return ctrl.Result{}, nil
 	}
 
 	// If any of the current objects are not in the desired objects, delete them
