@@ -17,27 +17,27 @@ package controllers
 
 import (
 	"context"
-	"fmt"
-	"log"
+	"github.com/go-logr/logr"
+	"strings"
 	"time"
 
-	//"reflect"
+	// k8s api
+	corev1 "k8s.io/api/core/v1"
 
-	//"regexp"
-	"strings"
-
-	"github.com/go-logr/logr"
+	// apimachinery
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	//"k8s.io/apimachinery/pkg/conversion"
-	"k8s.io/apimachinery/pkg/runtime"
-	//"k8s.io/apimachinery/pkg/runtime/serializer"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+
+	// client-go
 	"k8s.io/client-go/kubernetes/scheme"
+
+	// controller-runtime
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	// controller specific imports
 	alertsv1 "github.com/yashbhutwala/kb-alert-controller/api/v1"
 )
 
@@ -53,57 +53,6 @@ var (
 	apiGVStr    = alertsv1.GroupVersion.String()
 )
 
-// We generally want to ignore (not requeue) NotFound errors, since we’ll get a reconciliation request once the object exists, and requeuing in the meantime won’t help.
-func ignoreNotFound(err error) error {
-	if apierrs.IsNotFound(err) {
-		return nil
-	}
-	return err
-}
-
-func parseK8sYaml(fileR []byte) []runtime.Object {
-
-	fmt.Printf("inside parseK8sYaml, input: %+v\n", fileR)
-
-	//acceptedK8sTypes := regexp.MustCompile(`(Role|ClusterRole|RoleBinding|ClusterRoleBinding|ServiceAccount|ConfigMap)`)
-	fileAsString := string(fileR[:])
-	//fmt.Printf("inside parseK8sYaml, fileAsString: %+v\n", fileAsString)
-	sepYamlfiles := strings.Split(fileAsString, "---")
-	//fmt.Printf("inside parseK8sYaml, sepYamlfiles: %+v\n", sepYamlfiles)
-
-	retVal := make([]runtime.Object, 0, len(sepYamlfiles))
-
-	for _, f := range sepYamlfiles {
-
-		//fmt.Printf("inside parseK8sYaml, f: %+v\n", f)
-		if f == "\n" || f == "" {
-			// ignore empty cases
-			continue
-		}
-
-		decode := scheme.Codecs.UniversalDeserializer().Decode
-		obj, _, err := decode([]byte(f), nil, nil)
-		// DEBUG
-		//obj, groupVersionKind, err := decode([]byte(f), nil, nil)
-		//fmt.Printf("obj: %+v, gvk: %+s, err: %+v\n", obj, groupVersionKind, err)
-		//fmt.Printf("tyoe of gvk: %+v", reflect.TypeOf(groupVersionKind))
-
-		if err != nil {
-			log.Println(fmt.Sprintf("Error while decoding YAML object. Err was: %s", err))
-			continue
-		}
-
-		retVal = append(retVal, obj)
-
-		//if !acceptedK8sTypes.MatchString(groupVersionKind.Kind) {
-		//	log.Printf("The custom-roles configMap contained K8s object types which are not supported! Skipping object with type: %s", groupVersionKind.Kind)
-		//} else {
-		//retVal = append(retVal, obj)
-		//}
-	}
-	return retVal
-}
-
 // +kubebuilder:rbac:groups=alerts.synopsys.com,resources=alerts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=alerts.synopsys.com,resources=alerts/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=alerts,resources=pods,verbs=get;list;watch;create;update;patch;delete
@@ -112,11 +61,9 @@ func parseK8sYaml(fileR []byte) []runtime.Object {
 // +kubebuilder:rbac:groups=alerts,resources=services,verbs=get;list;watch;create;update;patch;delete
 
 func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
-
 	ctx := context.Background()
-	log := r.Log.WithValues("alert", req.NamespacedName)
+	log := r.Log.WithValues("name and namespace of the alert to reconcile", req.NamespacedName)
 
-	// your logic here
 	var alert alertsv1.Alert
 	if err := r.Get(ctx, req.NamespacedName, &alert); err != nil {
 		log.Error(err, "unable to fetch Alert")
@@ -126,346 +73,133 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		return ctrl.Result{}, ignoreNotFound(err)
 	}
 
+	// Get current resources "owned" by Alert CR
 	var childConfigMapList corev1.ConfigMapList
 	if err := r.List(ctx, &childConfigMapList, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
 		log.Error(err, "unable to list childConfigMapList")
 		return ctrl.Result{}, err
 	}
 
-	var childServiceList corev1.ServiceList
-	if err := r.List(ctx, &childServiceList, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
-		log.Error(err, "unable to list childServiceList")
-		return ctrl.Result{}, err
-	}
+	kindRuntimeObjectMap, labelComponentRuntimeObjectMap := r.convertYamlFileToRuntimeObjects([]byte(alert.Spec.YamlConfig))
+	log.V(1).Info("Parsed the yaml into K8s runtime object", "kindRuntimeObjectMap", kindRuntimeObjectMap, "labelComponentRuntimeObjectMap", labelComponentRuntimeObjectMap)
 
-	var childReplicationControllerList corev1.ReplicationControllerList
-	if err := r.List(ctx, &childReplicationControllerList, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
-		log.Error(err, "unable to list childReplicationControllerList")
-		return ctrl.Result{}, err
-	}
+	log.V(1).Info("[STAGE 1]: create all ConfigMap")
+	// TODO: could take in a mutate function
+	r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, kindRuntimeObjectMap["ConfigMap"])
 
-	var childSecretList corev1.SecretList
-	if err := r.List(ctx, &childSecretList, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
-		log.Error(err, "unable to list childSecretList")
-		return ctrl.Result{}, err
-	}
+	log.V(1).Info("[STAGE 2]: create all objects with label componenets: cfssl")
+	r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, labelComponentRuntimeObjectMap["cfssl"])
+	delete(labelComponentRuntimeObjectMap, "cfssl")
 
-	//var staged map[string][]runtime.Object
-	//for _, currRunTimeObj := range childJobs {
-	//	switch currRunTimeObj.(type) {
-	//	case *corev1.ConfigMap:
-	//		staged["STAGE 1"] = append(staged["STAGE 1"], currRunTimeObj)
-	//		continue
-	//	}
-	//
-	//	accessor := meta.NewAccessor()
-	//	labels, _ := accessor.Labels(currRunTimeObj)
-	//
-	//	switch strings.TrimSpace(labels["component"]) {
-	//	case "cfssl":
-	//		staged["STAGE 2"] = append(staged["STAGE 2"], currRunTimeObj)
-	//	case "alert":
-	//		staged["STAGE 3"] = append(staged["STAGE 3"], currRunTimeObj)
-	//
-	//	default:
-	//		staged["STAGE 4"] = append(staged["STAGE 4"], currRunTimeObj)
-	//	}
-	//}
+	log.V(1).Info("[STAGE 3]: create all objects with label componenets: alert")
+	r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, labelComponentRuntimeObjectMap["alert"])
+	delete(labelComponentRuntimeObjectMap, "alert")
 
-	yamlConfig := alert.Spec.YamlConfig
-	log.V(1).Info("Got the yamlConfig", "job", yamlConfig)
-
-	arrOfRuntimeObjs := parseK8sYaml([]byte(yamlConfig))
-	log.V(1).Info("Parsed the yaml into K8s runtime object", "arrOfRuntimeObjs", arrOfRuntimeObjs)
-
-	// STAGE 1: configMap
-	fmt.Println("STAGE 1 I CHOOSE YOU!")
-	count := 0
-
-	for _, runtimeObj := range arrOfRuntimeObjs {
-		switch runtimeObj.(type) {
-		case *corev1.ConfigMap:
-			// Set an owner reference
-			if err := ctrl.SetControllerReference(&alert, runtimeObj.(metav1.Object), r.Scheme); err != nil {
-				return ctrl.Result{}, nil
-			}
-			_, err := ctrl.CreateOrUpdate(ctx, r.Client, runtimeObj, func() error {
-				return nil
-			})
-			if err != nil {
-				// TODO: delete everything in stages 2, 3, 4 ... and requeue
-				log.Error(err, "unable to get past STAGE 1, deleting all child Objects", "runtimeObj", runtimeObj)
-				for _, item := range childConfigMapList.Items {
-					r.Client.Delete(ctx, item)
-				}
-				//for _, item := range append(staged["STAGE 2"], append(staged["STAGE 3"], staged["STAGE 4"]...)...) {
-				//	r.Delete(ctx, item)
-				//}
-				return ctrl.Result{}, err
-			}
-			arrOfRuntimeObjs = append(arrOfRuntimeObjs[:count], arrOfRuntimeObjs[count+1:]...)
-		default:
-			count += 1
+	log.V(1).Info("[STAGE 4]: create all remainder objects")
+	for label, runtimeObjectList := range labelComponentRuntimeObjectMap {
+		if !strings.EqualFold(label, "cfssl") && !strings.EqualFold(label, "alert") {
+			r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, runtimeObjectList)
 		}
 	}
 
-	// STAGE 2: cfssl
-	fmt.Println("STAGE 2 Deploy!")
-	count = 0
-	for _, runtimeObj := range arrOfRuntimeObjs {
+	return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
+}
 
-		accessor := meta.NewAccessor()
-		labels, _ := accessor.Labels(runtimeObj)
-		fmt.Printf("labels: %+v \n", labels)
-		fmt.Printf("labels[app]: %+v \n", labels["component"])
-
-		switch strings.TrimSpace(labels["component"]) {
-		case "cfssl":
-			// Set an owner reference
-			if err := ctrl.SetControllerReference(&alert, runtimeObj.(metav1.Object), r.Scheme); err != nil {
-				return ctrl.Result{}, nil
-			}
-
-			log.V(1).Info("Stage 2, deploying cfssl labeled resources", "runtimeObj", runtimeObj)
-			_, err := ctrl.CreateOrUpdate(ctx, r.Client, runtimeObj, func() error {
-				return nil
-			})
-			if err != nil {
-				// Delete dependent objects and requeue
-				log.Error(err, "unable to get past STAGE 2, deleting all Objects after Stage 2", "runtimeObj", runtimeObj)
-				//for _, item := range childReplicationControllerList.Items {
-				//	labels, _ := accessor.Labels(item)
-				//	switch strings.TrimSpace(labels["component"]) {
-				//	case "cfssl":
-				//		continue
-				//	case "alert":
-				//		r.Delete(ctx, item)
-				//	default:
-				//		r.Delete(ctx, item)
-				//	}
-				//}
-				//
-				//for _, item := range childServiceList.Items {
-				//	labels, _ := accessor.Labels(item)
-				//	switch strings.TrimSpace(labels["component"]) {
-				//	case "cfssl":
-				//		continue
-				//	case "alert":
-				//		r.Delete(ctx, item)
-				//	default:
-				//		r.Delete(ctx, item)
-				//	}
-				//}
-				//
-				//for _, item := range childSecretList.Items {
-				//	labels, _ := accessor.Labels(item)
-				//	switch strings.TrimSpace(labels["component"]) {
-				//	case "cfssl":
-				//		continue
-				//	case "alert":
-				//		r.Delete(ctx, item)
-				//	default:
-				//		r.Delete(ctx, item)
-				//	}
-				//}
-
-				return ctrl.Result{}, err
-			}
-			arrOfRuntimeObjs = append(arrOfRuntimeObjs[:count], arrOfRuntimeObjs[count+1:]...)
-		default:
-			count += 1
-		}
-	}
-
-	// STAGE 3: alert
-	fmt.Println("STAGE 3 Get in here!")
-	count = 0
-	for _, runtimeObj := range arrOfRuntimeObjs {
-
-		accessor := meta.NewAccessor()
-		labels, _ := accessor.Labels(runtimeObj)
-		fmt.Printf("labels: %+v \n", labels)
-		fmt.Printf("labels[app]: %+v \n", labels["component"])
-
-		switch strings.TrimSpace(labels["component"]) {
-
-		case "alert":
-			// Set an owner reference
-			if err := ctrl.SetControllerReference(&alert, runtimeObj.(metav1.Object), r.Scheme); err != nil {
-				return ctrl.Result{}, nil
-			}
-
-			log.V(1).Info("About to make some dope K8s runtime object", "runtimeObj", runtimeObj)
-			_, err := ctrl.CreateOrUpdate(ctx, r.Client, runtimeObj, func() error {
-				return nil
-			})
-			if err != nil {
-				log.Error(err, "unable to create runtimeObj", "runtimeObj", runtimeObj)
-
-				//for _, item := range childReplicationControllerList.Items {
-				//	labels, _ := accessor.Labels(item)
-				//	switch strings.TrimSpace(labels["component"]) {
-				//	case "cfssl":
-				//		r.Delete(ctx, item)
-				//	case "alert":
-				//		continue
-				//	default:
-				//		r.Delete(ctx, item)
-				//	}
-				//}
-				//
-				//for _, item := range childServiceList.Items {
-				//	labels, _ := accessor.Labels(item)
-				//	switch strings.TrimSpace(labels["component"]) {
-				//	case "cfssl":
-				//		r.Delete(ctx, item)
-				//	case "alert":
-				//		continue
-				//	default:
-				//		r.Delete(ctx, item)
-				//	}
-				//}
-				//
-				//for _, item := range childSecretList.Items {
-				//	labels, _ := accessor.Labels(item)
-				//	switch strings.TrimSpace(labels["component"]) {
-				//	case "cfssl":
-				//		r.Delete(ctx, item)
-				//	case "alert":
-				//		continue
-				//	default:
-				//		r.Client.Delete(ctx, item)
-				//		r.Delete(ctx, item)
-				//	}
-				//}
-
-				//for _, item := range staged["STAGE 4"] {
-				//	r.Delete(ctx, item)
-				//}
-				return ctrl.Result{}, err
-			}
-			arrOfRuntimeObjs = append(arrOfRuntimeObjs[:count], arrOfRuntimeObjs[count+1:]...)
-		default:
-			count += 1
-		}
-	}
-
-	// STAGE 4: everything else
-	fmt.Println("STAGE 4 Gimme some more")
-	count = 0
-	for _, runtimeObj := range arrOfRuntimeObjs {
+func (r *AlertReconciler) CreateOrUpdateRuntimeObjects(ctx context.Context, log logr.Logger, alert *alertsv1.Alert, runtimeObjectList []runtime.Object) (ctrl.Result, error) {
+	for _, runtimeObject := range runtimeObjectList {
 		// Set an owner reference
-		if err := ctrl.SetControllerReference(&alert, runtimeObj.(metav1.Object), r.Scheme); err != nil {
+		if err := ctrl.SetControllerReference(alert, runtimeObject.(metav1.Object), r.Scheme); err != nil {
+			// Requeue if we cannot set owner on the object
+			// TODO: change this to requeue, and only not requeue when we get "newAlreadyOwnedError", i.e: if it's already owned by our CR
+			//return ctrl.Result{}, err
 			return ctrl.Result{}, nil
 		}
 
-		log.V(1).Info("About to make some dope K8s runtime object", "runtimeObj", runtimeObj)
-		_, err := ctrl.CreateOrUpdate(ctx, r.Client, runtimeObj, func() error {
+		//err := r.Client.Get(ctx, types.NamespacedName{Name:runtimeObject.(metav1.Object).GetName(), Namespace:runtimeObject.(metav1.Object).GetNamespace()}, &corev1.ConfigMap{})
+		// Create or Update the ConfigMap
+		opresult, err := ctrl.CreateOrUpdate(ctx, r.Client, runtimeObject, func() error {
 			return nil
 		})
+		log.V(1).Info("Result of CreateOrUpdate on CFSSL runtimeObject", "runtimeObject", runtimeObject, "opresult", opresult)
+
+		// TODO: Case 1: we needed to update the configMap and now we should delete and redploy objects in STAGE 3, 4 ...
+		// TODO: Case 2: we failed to update the configMap...TODO
 		if err != nil {
-			log.Error(err, "unable to create runtimeObj", "runtimeObj", runtimeObj)
+			// TODO: delete everything in stages 3, 4 ... and requeue
+			log.Error(err, "unable to create or update STAGE 2 objects, deleting all child Objects", "runtimeObject", runtimeObject)
 			return ctrl.Result{}, err
 		}
-		// TODO: do a cleanup of the remaining resources
 	}
-
-	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	return ctrl.Result{}, nil
 }
 
-//func setIndexing(mgr ctrl.Manager, ro metav1.Object) error {
-//	if err := mgr.GetFieldIndexer().IndexField(ro.(runtime.Object), jobOwnerKey, func(rawObj runtime.Object) []string {
-//		// grab the job object, extract the owner...
-//		//configMap := rawObj.(*corev1.ConfigMap)
-//		owner := metav1.GetControllerOf(ro)
-//		if owner == nil {
-//			return nil
-//		}
-//		// ...make sure it's a Alert...
-//		if owner.APIVersion != apiGVStr || owner.Kind != "Alert" {
-//			return nil
-//		}
-//
-//		// ...and if so, return it
-//		return []string{owner.Name}
-//	}); err != nil {
-//		return err
-//	}
-//	return nil
-//}
+// We generally want to ignore (not requeue) NotFound errors, since we’ll get a reconciliation request once the object exists, and requeuing in the meantime won’t help.
+func ignoreNotFound(err error) error {
+	if apierrs.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+func (r *AlertReconciler) convertYamlFileToRuntimeObjects(fileR []byte) (map[string][]runtime.Object, map[string][]runtime.Object) {
+	//acceptedK8sTypes := regexp.MustCompile(`(Role|ClusterRole|RoleBinding|ClusterRoleBinding|ServiceAccount|ConfigMap)`)
+	fileAsString := string(fileR[:])
+	listOfSingleK8sResourceYaml := strings.Split(fileAsString, "---")
+	kindRuntimeObjectMap := make(map[string][]runtime.Object, 0)
+	labelComponentRuntimeObjectMap := make(map[string][]runtime.Object, 0)
+
+	for _, singleYaml := range listOfSingleK8sResourceYaml {
+		if singleYaml == "\n" || singleYaml == "" {
+			// ignore empty cases
+			continue
+		}
+		decode := scheme.Codecs.UniversalDeserializer().Decode
+		runtimeObject, groupVersionKind, err := decode([]byte(singleYaml), nil, nil)
+		if err != nil {
+			r.Log.V(1).Info("unable to decode a single yaml object, skipping", "singleYaml", singleYaml)
+			continue
+		}
+		kindRuntimeObjectMap[groupVersionKind.Kind] = append(kindRuntimeObjectMap[groupVersionKind.Kind], runtimeObject)
+		//if !acceptedK8sTypes.MatchString(groupVersionKind.Kind) {
+		//	log.Printf("The custom-roles configMap contained K8s object types which are not supported! Skipping object with type: %s", groupVersionKind.Kind)
+		//}
+		accessor := meta.NewAccessor()
+		labels, err := accessor.Labels(runtimeObject)
+		if err != nil {
+			r.Log.V(1).Info("unable to get labels for a k8s object, skipping", "runtimeObject", runtimeObject)
+			continue
+		}
+		labelComponentRuntimeObjectMap[labels["component"]] = append(labelComponentRuntimeObjectMap[labels["component"]], runtimeObject)
+	}
+	return kindRuntimeObjectMap, labelComponentRuntimeObjectMap
+}
+
+func (r *AlertReconciler) SetIndexingForChildrenObjects(mgr ctrl.Manager, ro runtime.Object) error {
+	if err := mgr.GetFieldIndexer().IndexField(ro, jobOwnerKey, func(rawObj runtime.Object) []string {
+		// grab the job object, extract the owner...
+		owner := metav1.GetControllerOf(ro.(metav1.Object))
+		if owner == nil {
+			return nil
+		}
+		// ...make sure it's a Alert...
+		if owner.APIVersion != apiGVStr || owner.Kind != "Alert" {
+			return nil
+		}
+
+		// ...and if so, return it
+		return []string{owner.Name}
+	}); err != nil {
+		return err
+	}
+	return nil
+}
 
 func (r *AlertReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if err := mgr.GetFieldIndexer().IndexField(&corev1.ConfigMap{}, jobOwnerKey, func(rawObj runtime.Object) []string {
-		// grab the job object, extract the owner...
-		namespace := rawObj.(*corev1.ConfigMap)
-		owner := metav1.GetControllerOf(namespace)
-		if owner == nil {
-			return nil
-		}
-		// ...make sure it's a Alert...
-		if owner.APIVersion != apiGVStr || owner.Kind != "Alert" {
-			return nil
-		}
-
-		// ...and if so, return it
-		return []string{owner.Name}
-	}); err != nil {
-		return err
-	}
-
-	if err := mgr.GetFieldIndexer().IndexField(&corev1.Service{}, jobOwnerKey, func(rawObj runtime.Object) []string {
-		// grab the job object, extract the owner...
-		namespace := rawObj.(*corev1.Service)
-		owner := metav1.GetControllerOf(namespace)
-		if owner == nil {
-			return nil
-		}
-		// ...make sure it's a Alert...
-		if owner.APIVersion != apiGVStr || owner.Kind != "Alert" {
-			return nil
-		}
-
-		// ...and if so, return it
-		return []string{owner.Name}
-	}); err != nil {
-		return err
-	}
-
-	if err := mgr.GetFieldIndexer().IndexField(&corev1.ReplicationController{}, jobOwnerKey, func(rawObj runtime.Object) []string {
-		// grab the job object, extract the owner...
-		namespace := rawObj.(*corev1.ReplicationController)
-		owner := metav1.GetControllerOf(namespace)
-		if owner == nil {
-			return nil
-		}
-		// ...make sure it's a Alert...
-		if owner.APIVersion != apiGVStr || owner.Kind != "Alert" {
-			return nil
-		}
-
-		// ...and if so, return it
-		return []string{owner.Name}
-	}); err != nil {
-		return err
-	}
-
-	if err := mgr.GetFieldIndexer().IndexField(&corev1.Secret{}, jobOwnerKey, func(rawObj runtime.Object) []string {
-		// grab the job object, extract the owner...
-		namespace := rawObj.(*corev1.Secret)
-		owner := metav1.GetControllerOf(namespace)
-		if owner == nil {
-			return nil
-		}
-		// ...make sure it's a Alert...
-		if owner.APIVersion != apiGVStr || owner.Kind != "Alert" {
-			return nil
-		}
-
-		// ...and if so, return it
-		return []string{owner.Name}
-	}); err != nil {
-		return err
-	}
+	// Code here allows to kick off a reconciliation when objects our controller manages are changed somehow
+	r.SetIndexingForChildrenObjects(mgr, &corev1.ConfigMap{})
+	r.SetIndexingForChildrenObjects(mgr, &corev1.Service{})
+	r.SetIndexingForChildrenObjects(mgr, &corev1.ReplicationController{})
+	r.SetIndexingForChildrenObjects(mgr, &corev1.Secret{})
 
 	alertBuilder := ctrl.NewControllerManagedBy(mgr).For(&alertsv1.Alert{})
 	alertBuilder = alertBuilder.Owns(&corev1.ConfigMap{})
