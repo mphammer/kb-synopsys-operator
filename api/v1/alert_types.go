@@ -26,7 +26,8 @@ import (
 type AlertSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
-	YamlConfig string `json:"yamlConfig"`
+	FinalYamlUrl   string `json:"finalYamlUrl"`
+	ShaOfFinalYaml string `json:"shaOfFinalYaml"`
 }
 
 // AlertStatus defines the observed state of Alert

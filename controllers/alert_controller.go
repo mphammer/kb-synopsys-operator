@@ -16,10 +16,15 @@ limitations under the License.
 package controllers
 
 import (
+	// built-in
 	"context"
-	"github.com/go-logr/logr"
+	"fmt"
+	"io/ioutil"
+	"net/http"
 	"strings"
-	"time"
+
+	// logr
+	"github.com/go-logr/logr"
 
 	// k8s api
 	corev1 "k8s.io/api/core/v1"
@@ -73,36 +78,97 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		return ctrl.Result{}, ignoreNotFound(err)
 	}
 
-	// Get current resources "owned" by Alert CR
-	var childConfigMapList corev1.ConfigMapList
-	if err := r.List(ctx, &childConfigMapList, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
-		log.Error(err, "unable to list childConfigMapList")
+	// TODO: either read contents of yaml from locally mounted file
+	// read content of full desired yaml from externally hosted file
+	content, err := r.httpGet(alert.Spec.FinalYamlUrl)
+	if err != nil {
+		log.Error(err, "HTTPGet failed")
 		return ctrl.Result{}, err
 	}
 
-	kindRuntimeObjectMap, labelComponentRuntimeObjectMap := r.convertYamlFileToRuntimeObjects([]byte(alert.Spec.YamlConfig))
-	log.V(1).Info("Parsed the yaml into K8s runtime object", "kindRuntimeObjectMap", kindRuntimeObjectMap, "labelComponentRuntimeObjectMap", labelComponentRuntimeObjectMap)
+	mapOfKindToDesiredRuntimeObject, mapOfComponentLabelToDesiredRuntimeObject := r.convertYamlFileToRuntimeObjects(content)
+	log.V(1).Info("Parsed the yaml into K8s runtime object", "mapOfKindToDesiredRuntimeObject", mapOfKindToDesiredRuntimeObject, "mapOfComponentLabelToDesiredRuntimeObject", mapOfComponentLabelToDesiredRuntimeObject)
 
-	log.V(1).Info("[STAGE 1]: create all ConfigMap")
-	// TODO: could take in a mutate function
-	r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, kindRuntimeObjectMap["ConfigMap"])
-
-	log.V(1).Info("[STAGE 2]: create all objects with label componenets: cfssl")
-	r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, labelComponentRuntimeObjectMap["cfssl"])
-	delete(labelComponentRuntimeObjectMap, "cfssl")
-
-	log.V(1).Info("[STAGE 3]: create all objects with label componenets: alert")
-	r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, labelComponentRuntimeObjectMap["alert"])
-	delete(labelComponentRuntimeObjectMap, "alert")
-
-	log.V(1).Info("[STAGE 4]: create all remainder objects")
-	for label, runtimeObjectList := range labelComponentRuntimeObjectMap {
-		if !strings.EqualFold(label, "cfssl") && !strings.EqualFold(label, "alert") {
-			r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, runtimeObjectList)
+	// TODO: potentially this is what convertYamlFileToRuntimeObjects returns
+	var mapOfKindToMapOfNameToDesiredRuntimeObject map[string]map[string]runtime.Object
+	for kind, listOfRuntimeObjects := range mapOfKindToDesiredRuntimeObject {
+		for _, item := range listOfRuntimeObjects {
+			key := item.(metav1.Object).GetName()
+			mapOfKindToMapOfNameToDesiredRuntimeObject[kind][key] = item
 		}
 	}
 
-	return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
+	// Get current runtime objects "owned" by Alert CR
+	var listOfCurrentRuntimeObjectsOwnedByAlertCr metav1.List
+	if err := r.List(ctx, &listOfCurrentRuntimeObjectsOwnedByAlertCr, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
+		log.Error(err, "unable to list currentRuntimeObjectsOwnedByAlertCr")
+		return ctrl.Result{}, err
+	}
+
+	// If any of the current objects are not in the desired objects, delete them
+	for _, currentRuntimeObjectOwnedByAlertCr := range listOfCurrentRuntimeObjectsOwnedByAlertCr.Items {
+		kind := currentRuntimeObjectOwnedByAlertCr.Object.GetObjectKind().GroupVersionKind().Kind
+		uniqueIdentifierRuntimeObject := currentRuntimeObjectOwnedByAlertCr.Object.(runtime.Object)
+		uniqueIdentifier := uniqueIdentifierRuntimeObject.(metav1.Object).GetName()
+		_, ok := mapOfKindToMapOfNameToDesiredRuntimeObject[kind][uniqueIdentifier]
+		if !ok {
+			err := r.Delete(ctx, uniqueIdentifierRuntimeObject)
+			if err != nil {
+				// if any error in deleting, just continue
+				continue
+			}
+		}
+	}
+
+	// TODO: Make a directed acyclic graph for all stages, and apply some DAG algorithms
+	log.V(1).Info("[STAGE 1]: create all ConfigMap")
+	// TODO: could take in a mutate function or even better a runtimeObjectList that are dependent on this object
+	result, err := r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, mapOfKindToDesiredRuntimeObject["ConfigMap"])
+	if err != nil {
+		return result, err
+	}
+	delete(mapOfKindToDesiredRuntimeObject, "ConfigMap")
+
+	log.V(1).Info("[STAGE 2]: create all objects with label componenets: cfssl")
+	result, err = r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, mapOfComponentLabelToDesiredRuntimeObject["cfssl"])
+	if err != nil {
+		return result, err
+	}
+	delete(mapOfComponentLabelToDesiredRuntimeObject, "cfssl")
+
+	log.V(1).Info("[STAGE 3]: create all objects with label componenets: alert")
+	result, err = r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, mapOfComponentLabelToDesiredRuntimeObject["alert"])
+	if err != nil {
+		return result, err
+	}
+	delete(mapOfComponentLabelToDesiredRuntimeObject, "alert")
+
+	log.V(1).Info("[STAGE 4]: create all remainder objects")
+	for label, runtimeObjectList := range mapOfComponentLabelToDesiredRuntimeObject {
+		if !strings.EqualFold(label, "cfssl") && !strings.EqualFold(label, "alert") {
+			result, err = r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, runtimeObjectList)
+			if err != nil {
+				return result, err
+			}
+		}
+	}
+
+	// TODO: By adding sha, we no longer need to requeue after (awesome!!), but it's here just in case you need to re-enable it
+	//return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
+	return ctrl.Result{}, nil
+}
+
+func (r *AlertReconciler) httpGet(url string) (content []byte, err error) {
+	response, err := http.Get(url)
+	if err != nil {
+		return
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != 200 {
+		return nil, fmt.Errorf("INVALID RESPONSE; status: %s", response.Status)
+	}
+	return ioutil.ReadAll(response.Body)
 }
 
 func (r *AlertReconciler) CreateOrUpdateRuntimeObjects(ctx context.Context, log logr.Logger, alert *alertsv1.Alert, runtimeObjectList []runtime.Object) (ctrl.Result, error) {
@@ -142,6 +208,7 @@ func ignoreNotFound(err error) error {
 }
 
 func (r *AlertReconciler) convertYamlFileToRuntimeObjects(fileR []byte) (map[string][]runtime.Object, map[string][]runtime.Object) {
+
 	//acceptedK8sTypes := regexp.MustCompile(`(Role|ClusterRole|RoleBinding|ClusterRoleBinding|ServiceAccount|ConfigMap)`)
 	fileAsString := string(fileR[:])
 	listOfSingleK8sResourceYaml := strings.Split(fileAsString, "---")
