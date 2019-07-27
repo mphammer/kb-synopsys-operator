@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"reflect"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"strings"
 
 	// logr
@@ -128,21 +130,21 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	// TODO: Make a directed acyclic graph for all stages, and apply some DAG algorithms
 	log.V(1).Info("[STAGE 1]: create all ConfigMap")
 	// TODO: could take in a mutate function or even better a runtimeObjectList that are dependent on this object
-	result, err := r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, mapOfKindToDesiredRuntimeObject["ConfigMap"])
+	result, err := r.EnsureRuntimeObjects(ctx, log, &alert, mapOfKindToDesiredRuntimeObject["ConfigMap"])
 	if err != nil {
 		return result, err
 	}
 	delete(mapOfKindToDesiredRuntimeObject, "ConfigMap")
 
 	log.V(1).Info("[STAGE 2]: create all objects with label componenets: cfssl")
-	result, err = r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, mapOfComponentLabelToDesiredRuntimeObject["cfssl"])
+	result, err = r.EnsureRuntimeObjects(ctx, log, &alert, mapOfComponentLabelToDesiredRuntimeObject["cfssl"])
 	if err != nil {
 		return result, err
 	}
 	delete(mapOfComponentLabelToDesiredRuntimeObject, "cfssl")
 
 	log.V(1).Info("[STAGE 3]: create all objects with label componenets: alert")
-	result, err = r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, mapOfComponentLabelToDesiredRuntimeObject["alert"])
+	result, err = r.EnsureRuntimeObjects(ctx, log, &alert, mapOfComponentLabelToDesiredRuntimeObject["alert"])
 	if err != nil {
 		return result, err
 	}
@@ -151,7 +153,7 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	log.V(1).Info("[STAGE 4]: create all remainder objects")
 	for label, runtimeObjectList := range mapOfComponentLabelToDesiredRuntimeObject {
 		if !strings.EqualFold(label, "cfssl") && !strings.EqualFold(label, "alert") {
-			result, err = r.CreateOrUpdateRuntimeObjects(ctx, log, &alert, runtimeObjectList)
+			result, err = r.EnsureRuntimeObjects(ctx, log, &alert, runtimeObjectList)
 			if err != nil {
 				return result, err
 			}
@@ -176,28 +178,69 @@ func (r *AlertReconciler) httpGet(url string) (content []byte, err error) {
 	return ioutil.ReadAll(response.Body)
 }
 
-func (r *AlertReconciler) CreateOrUpdateRuntimeObjects(ctx context.Context, log logr.Logger, alert *alertsv1.Alert, runtimeObjectList []runtime.Object) (ctrl.Result, error) {
-	for _, runtimeObject := range runtimeObjectList {
-		// Set an owner reference
-		if err := ctrl.SetControllerReference(alert, runtimeObject.(metav1.Object), r.Scheme); err != nil {
-			// Requeue if we cannot set owner on the object
+func (r *AlertReconciler) EnsureRuntimeObjects(ctx context.Context, log logr.Logger, alert *alertsv1.Alert, listOfDesiredRuntimeObjects []runtime.Object) (ctrl.Result, error) {
+	for _, desiredRuntimeObject := range listOfDesiredRuntimeObjects {
+
+		// TODO: either get this working or wait for server side apply
+		// TODO: https://github.com/kubernetes-sigs/controller-runtime/issues/347
+		// TODO: https://github.com/kubernetes-sigs/controller-runtime/issues/464
+		// TODO: https://godoc.org/sigs.k8s.io/controller-runtime/pkg/controller/controllerutil#CreateOrUpdate
+
+		//pointerToDesiredRuntimeObject := &desiredRuntimeObject
+		//copyOfDesiredRuntimeObject := desiredRuntimeObject.DeepCopyObject()
+		//pointerToCopyOfDesiredRuntimeObject := &copyOfDesiredRuntimeObject
+		//opResult, err := ctrl.CreateOrUpdate(ctx, r.Client, *pointerToDesiredRuntimeObject, func() error {
+		//	*pointerToDesiredRuntimeObject = *pointerToCopyOfDesiredRuntimeObject
+		//	// Set an owner reference
+		//	if err := ctrl.SetControllerReference(alert, desiredRuntimeObject.(metav1.Object), r.Scheme); err != nil {
+		//		// Requeue if we cannot set owner on the object
+		//		//return err
+		//		return nil
+		//	}
+		//	return nil
+		//})
+
+		// set an owner reference
+		if err := ctrl.SetControllerReference(alert, desiredRuntimeObject.(metav1.Object), r.Scheme); err != nil {
+			// requeue if we cannot set owner on the object
 			// TODO: change this to requeue, and only not requeue when we get "newAlreadyOwnedError", i.e: if it's already owned by our CR
 			//return ctrl.Result{}, err
 			return ctrl.Result{}, nil
 		}
 
-		//err := r.Client.Get(ctx, types.NamespacedName{Name:runtimeObject.(metav1.Object).GetName(), Namespace:runtimeObject.(metav1.Object).GetNamespace()}, &corev1.ConfigMap{})
-		// Create or Update the ConfigMap
-		opresult, err := ctrl.CreateOrUpdate(ctx, r.Client, runtimeObject, func() error {
-			return nil
-		})
-		log.V(1).Info("Result of CreateOrUpdate on CFSSL runtimeObject", "runtimeObject", runtimeObject, "opresult", opresult)
+		var opResult controllerutil.OperationResult
+		key, err := client.ObjectKeyFromObject(desiredRuntimeObject)
+		if err != nil {
+			opResult = controllerutil.OperationResultNone
+		}
+
+		currentRuntimeObject := desiredRuntimeObject.DeepCopyObject()
+		if err := r.Client.Get(ctx, key, currentRuntimeObject); err != nil {
+			if !apierrs.IsNotFound(err) {
+				opResult = controllerutil.OperationResultNone
+			}
+			if err := r.Client.Create(ctx, desiredRuntimeObject); err != nil {
+				opResult = controllerutil.OperationResultNone
+			}
+			opResult = controllerutil.OperationResultCreated
+		}
+
+		existing := currentRuntimeObject
+		if reflect.DeepEqual(existing, desiredRuntimeObject) {
+			opResult = controllerutil.OperationResultNone
+		}
+
+		if err := r.Client.Update(ctx, desiredRuntimeObject); err != nil {
+			opResult = controllerutil.OperationResultNone
+		}
+
+		log.V(1).Info("Result of CreateOrUpdate on CFSSL desiredRuntimeObject", "desiredRuntimeObject", desiredRuntimeObject, "opResult", opResult)
 
 		// TODO: Case 1: we needed to update the configMap and now we should delete and redploy objects in STAGE 3, 4 ...
 		// TODO: Case 2: we failed to update the configMap...TODO
 		if err != nil {
 			// TODO: delete everything in stages 3, 4 ... and requeue
-			log.Error(err, "unable to create or update STAGE 2 objects, deleting all child Objects", "runtimeObject", runtimeObject)
+			log.Error(err, "unable to create or update STAGE 2 objects, deleting all child Objects", "desiredRuntimeObject", desiredRuntimeObject)
 			return ctrl.Result{}, err
 		}
 	}
