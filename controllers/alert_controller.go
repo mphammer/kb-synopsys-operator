@@ -60,6 +60,10 @@ var (
 	apiGVStr    = alertsv1.GroupVersion.String()
 )
 
+type VertexInterface struct {
+	Execute func() (ctrl.Result, error)
+}
+
 // +kubebuilder:rbac:groups=alerts.synopsys.com,resources=alerts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=alerts.synopsys.com,resources=alerts/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=alerts,resources=pods,verbs=get;list;watch;create;update;patch;delete
@@ -127,38 +131,65 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		}
 	}
 
-	// TODO: Make a directed acyclic graph for all stages, and apply some DAG algorithms
-	log.V(1).Info("[STAGE 1]: create all ConfigMap")
-	// TODO: could take in a mutate function or even better a runtimeObjectList that are dependent on this object
-	result, err := r.EnsureRuntimeObjects(ctx, log, &alert, mapOfKindToDesiredRuntimeObject["ConfigMap"])
-	if err != nil {
-		return result, err
+	alertGraph := NewDAG()
+	// Add Vertices to the Graph
+	for label, listOfRuntimeObjects := range mapOfComponentLabelToDesiredRuntimeObject {
+		for _, runtimeObject := range listOfRuntimeObjects {
+			runtimeObjectNode := NewVertex(label, func() (ctrl.Result, error) {
+				return r.EnsureRuntimeObjects(ctx, log, &alert, []runtime.Object{runtimeObject})
+			})
+			alertGraph.AddVertex(runtimeObjectNode)
+		}
 	}
-	delete(mapOfKindToDesiredRuntimeObject, "ConfigMap")
 
-	log.V(1).Info("[STAGE 2]: create all objects with label componenets: cfssl")
-	result, err = r.EnsureRuntimeObjects(ctx, log, &alert, mapOfComponentLabelToDesiredRuntimeObject["cfssl"])
-	if err != nil {
-		return result, err
+	// Add edges to the graph
+	alertCm, _ := alertGraph.GetVertex("alert-configmap")
+	alertSecret, _ := alertGraph.GetVertex("alert-secret")
+	//alertSvc, _ := alertGraph.GetVertex("alert-svc")
+	//cfsslSvc, _ := alertGraph.GetVertex("cfssl-svc")
+
+	alertRc, _ := alertGraph.GetVertex("alert-rc")
+	cfsslRc, _ := alertGraph.GetVertex("cfssl-rc")
+
+	alertGraph.AddEdge(alertCm, alertRc)
+	alertGraph.AddEdge(alertSecret, alertRc)
+	alertGraph.AddEdge(alertCm, cfsslRc)
+	fmt.Println(alertGraph.String())
+
+	type Result struct {
+		ctrl.Result
+		error
 	}
-	delete(mapOfComponentLabelToDesiredRuntimeObject, "cfssl")
 
-	log.V(1).Info("[STAGE 3]: create all objects with label componenets: alert")
-	result, err = r.EnsureRuntimeObjects(ctx, log, &alert, mapOfComponentLabelToDesiredRuntimeObject["alert"])
-	if err != nil {
-		return result, err
-	}
-	delete(mapOfComponentLabelToDesiredRuntimeObject, "alert")
-
-	log.V(1).Info("[STAGE 4]: create all remainder objects")
-	for label, runtimeObjectList := range mapOfComponentLabelToDesiredRuntimeObject {
-		if !strings.EqualFold(label, "cfssl") && !strings.EqualFold(label, "alert") {
-			result, err = r.EnsureRuntimeObjects(ctx, log, &alert, runtimeObjectList)
-			if err != nil {
-				return result, err
+	// Get stages (levels) of Alert to deploy
+	alertStages := alertGraph.GetLevelsFromDependencyMap()
+	for _, stage := range alertStages {
+		channels := make(chan Result, len(stage))
+		for _, node := range stage {
+			// spin off a goroutine
+			go func(node *Vertex) {
+				result, err := node.FuncToExecute()
+				r := Result{result, err}
+				channels <- r
+			}(node)
+		}
+		//close(channels)
+		for r := range channels {
+			if r.error != nil {
+				return r.Result, r.error
 			}
 		}
 	}
+
+	//log.V(1).Info("[STAGE 4]: create all remainder objects")
+	//for label, runtimeObjectList := range mapOfComponentLabelToDesiredRuntimeObject {
+	//	if !strings.EqualFold(label, "cfssl") && !strings.EqualFold(label, "alert") {
+	//		result, err = r.EnsureRuntimeObjects(ctx, log, &alert, runtimeObjectList)
+	//		if err != nil {
+	//			return result, err
+	//		}
+	//	}
+	//}
 
 	// TODO: By adding sha, we no longer need to requeue after (awesome!!), but it's here just in case you need to re-enable it
 	//return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil

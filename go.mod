@@ -4,6 +4,9 @@ go 1.12
 
 require (
 	github.com/go-logr/logr v0.1.0
+	github.com/goombaio/dag v0.0.0-20181006234417-a8874b1f72ff // indirect
+	github.com/goombaio/orderedmap v0.0.0-20180924084748-ba921b7e2419
+	github.com/goombaio/orderedset v0.0.0-20180924084730-d1b9fdd81eca
 	github.com/onsi/ginkgo v1.8.0
 	github.com/onsi/gomega v1.5.0
 	k8s.io/api v0.0.0-20190409021203-6e4e0e4f393b

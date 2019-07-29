@@ -79,3 +79,27 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+//func main() {
+//	a := &Node{ID: "a"}
+//	b := &Node{ID: "b"}
+//	c := &Node{ID: "c"}
+//	d := &Node{ID: "d"}
+//	e := &Node{ID: "e"}
+//	f := &Node{ID: "f"}
+//	g := &Node{ID: "g"}
+//	h := &Node{ID: "h"}
+//
+//	unsorted := map[*Node][]*Node{
+//		a: []*Node{b, e},
+//		b: []*Node{d, f},
+//		c: []*Node{f},
+//		d: []*Node{f, h},
+//		e: []*Node{},
+//		f: []*Node{g},
+//		g: []*Node{h},
+//		h: []*Node{}}
+//
+//	sorted := GetLevelsFromDependencyMap(unsorted)
+//	fmt.Printf("Result: %s\n", sorted)
+//}
