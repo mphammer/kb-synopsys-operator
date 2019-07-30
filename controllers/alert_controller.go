@@ -46,6 +46,8 @@ import (
 
 	// controller specific imports
 	alertsv1 "github.com/yashbhutwala/kb-synopsys-operator/api/v1"
+
+	scheduler "github.com/yashbhutwala/go-scheduler"
 )
 
 // AlertReconciler reconciles a Alert object
@@ -131,56 +133,26 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		}
 	}
 
-	alertGraph := NewDAG()
-	// Add Vertices to the Graph
+	alertScheduler := scheduler.New(scheduler.ConcurrentTasks(5))
+	taskMap := make(map[string]*scheduler.Task)
 	for label, listOfRuntimeObjects := range mapOfComponentLabelToDesiredRuntimeObject {
 		for _, runtimeObject := range listOfRuntimeObjects {
-			runtimeObjectNode := NewVertex(label, func() (ctrl.Result, error) {
-				return r.EnsureRuntimeObjects(ctx, log, &alert, []runtime.Object{runtimeObject})
-			})
-			alertGraph.AddVertex(runtimeObjectNode)
-		}
-	}
-
-	// Add edges to the graph
-	alertCm, _ := alertGraph.GetVertex("alert-configmap")
-	alertSecret, _ := alertGraph.GetVertex("alert-secret")
-	//alertSvc, _ := alertGraph.GetVertex("alert-svc")
-	//cfsslSvc, _ := alertGraph.GetVertex("cfssl-svc")
-
-	alertRc, _ := alertGraph.GetVertex("alert-rc")
-	cfsslRc, _ := alertGraph.GetVertex("cfssl-rc")
-
-	alertGraph.AddEdge(alertCm, alertRc)
-	alertGraph.AddEdge(alertSecret, alertRc)
-	alertGraph.AddEdge(alertCm, cfsslRc)
-	fmt.Println(alertGraph.String())
-
-	type Result struct {
-		ctrl.Result
-		error
-	}
-
-	// Get stages (levels) of Alert to deploy
-	alertStages := alertGraph.GetLevelsFromDependencyMap()
-	for _, stage := range alertStages {
-		channels := make(chan Result, len(stage))
-		for _, node := range stage {
-			// spin off a goroutine
-			go func(node *Vertex) {
-				result, err := node.FuncToExecute()
-				r := Result{result, err}
-				channels <- r
-			}(node)
-		}
-		//close(channels)
-		for r := range channels {
-			if r.error != nil {
-				return r.Result, r.error
+			taskFunc := func(ctx context.Context) error {
+				_, err := r.EnsureRuntimeObjects(ctx, log, &alert, []runtime.Object{runtimeObject})
+				return err
 			}
+			task := alertScheduler.AddTask(taskFunc)
+			taskMap[label] = task
 		}
 	}
 
+	taskMap["alert-rc"].DependsOn(taskMap["alert-configmap"])
+	taskMap["alert-rc"].DependsOn(taskMap["alert-secret"])
+	taskMap["cfssl-rc"].DependsOn(taskMap["alert-configmap"])
+
+	if err := alertScheduler.Run(context.Background()); err != nil {
+		return ctrl.Result{}, err
+	}
 	//log.V(1).Info("[STAGE 4]: create all remainder objects")
 	//for label, runtimeObjectList := range mapOfComponentLabelToDesiredRuntimeObject {
 	//	if !strings.EqualFold(label, "cfssl") && !strings.EqualFold(label, "alert") {
