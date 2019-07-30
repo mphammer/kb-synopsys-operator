@@ -22,8 +22,11 @@ import (
 	"io/ioutil"
 	"net/http"
 	"reflect"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"strings"
+
+	"gopkg.in/yaml.v2"
+
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	// logr
 	"github.com/go-logr/logr"
@@ -48,6 +51,9 @@ import (
 	alertsv1 "github.com/yashbhutwala/kb-synopsys-operator/api/v1"
 
 	scheduler "github.com/yashbhutwala/go-scheduler"
+
+	"github.com/containous/yaegi/interp"
+	"github.com/containous/yaegi/stdlib"
 )
 
 // AlertReconciler reconciles a Alert object
@@ -86,6 +92,37 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		return ctrl.Result{}, ignoreNotFound(err)
 	}
 
+	// Dependency Resources from YAML file
+	type RuntimeObjectDependency struct {
+		Obj           string `yaml:"obj"`
+		IsDependentOn string `yaml:"isdependenton"`
+	}
+	type RuntimeObjectDepencyYaml struct {
+		MyFunc       string                    `yaml:"myfunc"`
+		Groups       map[string][]string       `yaml:"runtimeobjectsgroupings"`
+		Dependencies []RuntimeObjectDependency `yaml:"runtimeobjectdependencies"`
+	}
+	// Read Dependcy YAML File into Struct
+	filepath := "/Users/hammer/go/src/github.com/blackducksoftware/kb-synopsys-operator/controllers/alert-dependencies.yaml"
+	dependencyYamlBytes, err := ioutil.ReadFile(filepath)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to read from file %s: %s", filepath, err)
+	}
+
+	dependencyYamlStruct := &RuntimeObjectDepencyYaml{}
+	err = yaml.Unmarshal(dependencyYamlBytes, dependencyYamlStruct)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	fmt.Printf("DependencyYamlStruct: %+v\n", dependencyYamlStruct)
+	f := dependencyYamlStruct.MyFunc
+	// fmt.Printf("Func Result: %+v", f)
+
+	i := interp.New(interp.Options{})
+	i.Use(stdlib.Symbols)
+	i.Eval(`import "fmt"`)
+	i.Eval(f)
+
 	// TODO: either read contents of yaml from locally mounted file
 	// read content of full desired yaml from externally hosted file
 	content, err := r.httpGet(alert.Spec.FinalYamlUrl)
@@ -111,6 +148,7 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	// Get current runtime objects "owned" by Alert CR
+	fmt.Printf("Creating Tasks for RuntimeObjects...\n")
 	var listOfCurrentRuntimeObjectsOwnedByAlertCr metav1.List
 	if err := r.List(ctx, &listOfCurrentRuntimeObjectsOwnedByAlertCr, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
 		log.Error(err, "unable to list currentRuntimeObjectsOwnedByAlertCr")
@@ -119,6 +157,7 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	// If any of the current objects are not in the desired objects, delete them
+	fmt.Printf("Creating Task Dependencies...\n")
 	for _, currentRuntimeObjectOwnedByAlertCr := range listOfCurrentRuntimeObjectsOwnedByAlertCr.Items {
 		kind := currentRuntimeObjectOwnedByAlertCr.Object.GetObjectKind().GroupVersionKind().Kind
 		uniqueIdentifierRuntimeObject := currentRuntimeObjectOwnedByAlertCr.Object.(runtime.Object)
@@ -146,9 +185,28 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		}
 	}
 
-	taskMap["alert-rc"].DependsOn(taskMap["alert-configmap"])
-	taskMap["alert-rc"].DependsOn(taskMap["alert-secret"])
-	taskMap["cfssl-rc"].DependsOn(taskMap["alert-configmap"])
+	for _, dependency := range dependencyYamlStruct.Dependencies {
+		depTail := dependency.Obj
+		depHead := dependency.IsDependentOn // depTail --> depHead
+		fmt.Printf("Creating Task Dependency: %s -> %s\n", depTail, depHead)
+		// Get all RuntimeObjects for the Tail
+		tailRuntimeObjectIDs, ok := dependencyYamlStruct.Groups[depTail]
+		if !ok { // no group due to single object name
+			tailRuntimeObjectIDs = []string{depTail}
+		}
+		// Get all RuntimeObjects for the Head
+		headRuntimeObjectIDs, ok := dependencyYamlStruct.Groups[depHead]
+		if !ok { // no group due to single object name
+			headRuntimeObjectIDs = []string{depHead}
+		}
+		// Create dependencies from each tail to each head
+		for _, tailRuntimeObjectName := range tailRuntimeObjectIDs {
+			for _, headRuntimeObjectName := range headRuntimeObjectIDs {
+				taskMap[tailRuntimeObjectName].DependsOn(taskMap[headRuntimeObjectName])
+				fmt.Printf("   -  %s -> %s\n", tailRuntimeObjectName, headRuntimeObjectName)
+			}
+		}
+	}
 
 	if err := alertScheduler.Run(context.Background()); err != nil {
 		return ctrl.Result{}, err
@@ -281,13 +339,32 @@ func (r *AlertReconciler) convertYamlFileToRuntimeObjects(fileR []byte) (map[str
 		//if !acceptedK8sTypes.MatchString(groupVersionKind.Kind) {
 		//	log.Printf("The custom-roles configMap contained K8s object types which are not supported! Skipping object with type: %s", groupVersionKind.Kind)
 		//}
+
 		accessor := meta.NewAccessor()
-		labels, err := accessor.Labels(runtimeObject)
+		// BELOW -- Old Label Code
+		// labels, err := accessor.Labels(runtimeObject)
+		// if err != nil {
+		// 	r.Log.V(1).Info("unable to get labels for a k8s object, skipping", "runtimeObject", runtimeObject)
+		// 	continue
+		// }
+		// labelComponentRuntimeObjectMap[labels["component"]] = append(labelComponentRuntimeObjectMap[labels["component"]], runtimeObject)
+		// ABOVE -- Old Label Code
+		// BELOW - New Unique Label Code
+		runtimeObjectKind := groupVersionKind.Kind
+		runtimeObjectName, err := accessor.Name(runtimeObject)
 		if err != nil {
-			r.Log.V(1).Info("unable to get labels for a k8s object, skipping", "runtimeObject", runtimeObject)
+			fmt.Printf("Failed to get runtimeObject's name: %s", err)
 			continue
 		}
-		labelComponentRuntimeObjectMap[labels["component"]] = append(labelComponentRuntimeObjectMap[labels["component"]], runtimeObject)
+		runtimeObjectNamespace, err := accessor.Namespace(runtimeObject)
+		if err != nil {
+			fmt.Printf("Failed to get runtimeObject's namespace: %s", err)
+			continue
+		}
+		label := fmt.Sprintf("%s.%s.%s", runtimeObjectKind, runtimeObjectNamespace, runtimeObjectName)
+		fmt.Printf("Creating RuntimeObject Label: %s\n", label)
+		labelComponentRuntimeObjectMap[label] = append(labelComponentRuntimeObjectMap[label], runtimeObject)
+		// ABOVE - New Unique Label Code
 	}
 	return kindRuntimeObjectMap, labelComponentRuntimeObjectMap
 }
