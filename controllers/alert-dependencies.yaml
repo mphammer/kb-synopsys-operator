@@ -1,0 +1,8 @@
+obj: ReplicationController.default.demo-alert-alert
+isdependenton: ConfigMap.default.demo-alert-blackduck-config
+---
+obj: ReplicationController.default.demo-alert-alert
+isdependenton: "Secret.default.demo-alert-secret"
+---
+obj: ReplicationController.default.demo-alert-cfssl
+isdependenton: ConfigMap.default.demo-alert-blackduck-config

@@ -22,8 +22,11 @@ import (
 	"io/ioutil"
 	"net/http"
 	"reflect"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"strings"
+
+	"gopkg.in/yaml.v2"
+
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	// logr
 	"github.com/go-logr/logr"
@@ -146,9 +149,29 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		}
 	}
 
-	taskMap["alert-rc"].DependsOn(taskMap["alert-configmap"])
-	taskMap["alert-rc"].DependsOn(taskMap["alert-secret"])
-	taskMap["cfssl-rc"].DependsOn(taskMap["alert-configmap"])
+	// TODO: Create dependencies based on kind.namespace.name
+	type RuntimeObjectDependency struct {
+		Obj           string `yaml:"obj"`
+		IsDependentOn string `yaml:"isdependenton"`
+	}
+	filepath := "/Users/hammer/go/src/github.com/blackducksoftware/kb-synopsys-operator/controllers/alert-dependencies.yaml"
+	dependenciesBytes, err := ioutil.ReadFile(filepath)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to read from file %s: %s", filepath, err)
+	}
+	dependenciesString := string(dependenciesBytes[:])
+	listOfDependencyStrings := strings.Split(dependenciesString, "---")
+	for _, dependencyString := range listOfDependencyStrings {
+		fmt.Printf("Dependency String: %+v\n", dependencyString)
+		dep := &RuntimeObjectDependency{}
+		err := yaml.Unmarshal([]byte(dependencyString), dep)
+		if err != nil {
+			fmt.Printf("Failed to unmarshal: %s\n", err)
+			return ctrl.Result{}, fmt.Errorf("Failed to unmarshal: %s", err)
+		}
+		fmt.Printf("Creating Dependency %s -> %s\n", dep.Obj, dep.IsDependentOn)
+		taskMap[dep.Obj].DependsOn(taskMap[dep.IsDependentOn])
+	}
 
 	if err := alertScheduler.Run(context.Background()); err != nil {
 		return ctrl.Result{}, err
@@ -281,13 +304,32 @@ func (r *AlertReconciler) convertYamlFileToRuntimeObjects(fileR []byte) (map[str
 		//if !acceptedK8sTypes.MatchString(groupVersionKind.Kind) {
 		//	log.Printf("The custom-roles configMap contained K8s object types which are not supported! Skipping object with type: %s", groupVersionKind.Kind)
 		//}
+
 		accessor := meta.NewAccessor()
-		labels, err := accessor.Labels(runtimeObject)
+		// BELOW -- Old Label Code
+		// labels, err := accessor.Labels(runtimeObject)
+		// if err != nil {
+		// 	r.Log.V(1).Info("unable to get labels for a k8s object, skipping", "runtimeObject", runtimeObject)
+		// 	continue
+		// }
+		// labelComponentRuntimeObjectMap[labels["component"]] = append(labelComponentRuntimeObjectMap[labels["component"]], runtimeObject)
+		// ABOVE -- Old Label Code
+		// BELOW - New Unique Label Code
+		runtimeObjectKind := groupVersionKind.Kind
+		runtimeObjectName, err := accessor.Name(runtimeObject)
 		if err != nil {
-			r.Log.V(1).Info("unable to get labels for a k8s object, skipping", "runtimeObject", runtimeObject)
+			fmt.Printf("Failed to get runtimeObject's name: %s", err)
 			continue
 		}
-		labelComponentRuntimeObjectMap[labels["component"]] = append(labelComponentRuntimeObjectMap[labels["component"]], runtimeObject)
+		runtimeObjectNamespace, err := accessor.Namespace(runtimeObject)
+		if err != nil {
+			fmt.Printf("Failed to get runtimeObject's namespace: %s", err)
+			continue
+		}
+		label := fmt.Sprintf("%s.%s.%s", runtimeObjectKind, runtimeObjectNamespace, runtimeObjectName)
+		fmt.Printf("Creating RuntimeObject Label: %s\n", label)
+		labelComponentRuntimeObjectMap[label] = append(labelComponentRuntimeObjectMap[label], runtimeObject)
+		// ABOVE - New Unique Label Code
 	}
 	return kindRuntimeObjectMap, labelComponentRuntimeObjectMap
 }
