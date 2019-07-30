@@ -1,8 +1,22 @@
-obj: ReplicationController.default.demo-alert-alert
-isdependenton: ConfigMap.default.demo-alert-blackduck-config
 ---
-obj: ReplicationController.default.demo-alert-alert
-isdependenton: "Secret.default.demo-alert-secret"
+myfunc: fmt.Println("Verifying Postgres")
+runtimeobjectsgroupings:
+  ConfigMap:
+    - ConfigMap.default.demo-alert-blackduck-config
+  AlertRC:
+    - ReplicationController.default.demo-alert-alert
+  CfsslRC:
+    - ReplicationController.default.demo-alert-cfssl
+  AlertSecret:
+    - Secret.default.demo-alert-secret
+runtimeobjectdependencies:
+  - obj: AlertRC
+    isdependenton: ConfigMap
+  - obj: AlertRC
+    isdependenton: AlertSecret
+  - obj: CfsslRC
+    isdependenton: ConfigMap
+  - obj: ConfigMap
+    isdependenton: AlertSecret
 ---
-obj: ReplicationController.default.demo-alert-cfssl
-isdependenton: ConfigMap.default.demo-alert-blackduck-config
+

@@ -51,6 +51,9 @@ import (
 	alertsv1 "github.com/yashbhutwala/kb-synopsys-operator/api/v1"
 
 	scheduler "github.com/yashbhutwala/go-scheduler"
+
+	"github.com/containous/yaegi/interp"
+	"github.com/containous/yaegi/stdlib"
 )
 
 // AlertReconciler reconciles a Alert object
@@ -89,6 +92,37 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		return ctrl.Result{}, ignoreNotFound(err)
 	}
 
+	// Dependency Resources from YAML file
+	type RuntimeObjectDependency struct {
+		Obj           string `yaml:"obj"`
+		IsDependentOn string `yaml:"isdependenton"`
+	}
+	type RuntimeObjectDepencyYaml struct {
+		MyFunc       string                    `yaml:"myfunc"`
+		Groups       map[string][]string       `yaml:"runtimeobjectsgroupings"`
+		Dependencies []RuntimeObjectDependency `yaml:"runtimeobjectdependencies"`
+	}
+	// Read Dependcy YAML File into Struct
+	filepath := "/Users/hammer/go/src/github.com/blackducksoftware/kb-synopsys-operator/controllers/alert-dependencies.yaml"
+	dependencyYamlBytes, err := ioutil.ReadFile(filepath)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to read from file %s: %s", filepath, err)
+	}
+
+	dependencyYamlStruct := &RuntimeObjectDepencyYaml{}
+	err = yaml.Unmarshal(dependencyYamlBytes, dependencyYamlStruct)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	fmt.Printf("DependencyYamlStruct: %+v\n", dependencyYamlStruct)
+	f := dependencyYamlStruct.MyFunc
+	// fmt.Printf("Func Result: %+v", f)
+
+	i := interp.New(interp.Options{})
+	i.Use(stdlib.Symbols)
+	i.Eval(`import "fmt"`)
+	i.Eval(f)
+
 	// TODO: either read contents of yaml from locally mounted file
 	// read content of full desired yaml from externally hosted file
 	content, err := r.httpGet(alert.Spec.FinalYamlUrl)
@@ -114,6 +148,7 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	// Get current runtime objects "owned" by Alert CR
+	fmt.Printf("Creating Tasks for RuntimeObjects...\n")
 	var listOfCurrentRuntimeObjectsOwnedByAlertCr metav1.List
 	if err := r.List(ctx, &listOfCurrentRuntimeObjectsOwnedByAlertCr, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
 		log.Error(err, "unable to list currentRuntimeObjectsOwnedByAlertCr")
@@ -122,6 +157,7 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	// If any of the current objects are not in the desired objects, delete them
+	fmt.Printf("Creating Task Dependencies...\n")
 	for _, currentRuntimeObjectOwnedByAlertCr := range listOfCurrentRuntimeObjectsOwnedByAlertCr.Items {
 		kind := currentRuntimeObjectOwnedByAlertCr.Object.GetObjectKind().GroupVersionKind().Kind
 		uniqueIdentifierRuntimeObject := currentRuntimeObjectOwnedByAlertCr.Object.(runtime.Object)
@@ -149,28 +185,27 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		}
 	}
 
-	// TODO: Create dependencies based on kind.namespace.name
-	type RuntimeObjectDependency struct {
-		Obj           string `yaml:"obj"`
-		IsDependentOn string `yaml:"isdependenton"`
-	}
-	filepath := "/Users/hammer/go/src/github.com/blackducksoftware/kb-synopsys-operator/controllers/alert-dependencies.yaml"
-	dependenciesBytes, err := ioutil.ReadFile(filepath)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to read from file %s: %s", filepath, err)
-	}
-	dependenciesString := string(dependenciesBytes[:])
-	listOfDependencyStrings := strings.Split(dependenciesString, "---")
-	for _, dependencyString := range listOfDependencyStrings {
-		fmt.Printf("Dependency String: %+v\n", dependencyString)
-		dep := &RuntimeObjectDependency{}
-		err := yaml.Unmarshal([]byte(dependencyString), dep)
-		if err != nil {
-			fmt.Printf("Failed to unmarshal: %s\n", err)
-			return ctrl.Result{}, fmt.Errorf("Failed to unmarshal: %s", err)
+	for _, dependency := range dependencyYamlStruct.Dependencies {
+		depTail := dependency.Obj
+		depHead := dependency.IsDependentOn // depTail --> depHead
+		fmt.Printf("Creating Task Dependency: %s -> %s\n", depTail, depHead)
+		// Get all RuntimeObjects for the Tail
+		tailRuntimeObjectIDs, ok := dependencyYamlStruct.Groups[depTail]
+		if !ok { // no group due to single object name
+			tailRuntimeObjectIDs = []string{depTail}
 		}
-		fmt.Printf("Creating Dependency %s -> %s\n", dep.Obj, dep.IsDependentOn)
-		taskMap[dep.Obj].DependsOn(taskMap[dep.IsDependentOn])
+		// Get all RuntimeObjects for the Head
+		headRuntimeObjectIDs, ok := dependencyYamlStruct.Groups[depHead]
+		if !ok { // no group due to single object name
+			headRuntimeObjectIDs = []string{depHead}
+		}
+		// Create dependencies from each tail to each head
+		for _, tailRuntimeObjectName := range tailRuntimeObjectIDs {
+			for _, headRuntimeObjectName := range headRuntimeObjectIDs {
+				taskMap[tailRuntimeObjectName].DependsOn(taskMap[headRuntimeObjectName])
+				fmt.Printf("   -  %s -> %s\n", tailRuntimeObjectName, headRuntimeObjectName)
+			}
+		}
 	}
 
 	if err := alertScheduler.Run(context.Background()); err != nil {
