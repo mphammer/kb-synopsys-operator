@@ -1,12 +1,12 @@
 # Adds namespace to all resources.
-namespace: kb-alert-controller-system
+namespace: kb-synopsys-operator-system
 
 # Value of this field is prepended to the
 # names of all resources, e.g. a deployment named
 # "wordpress" becomes "alices-wordpress".
 # Note that it should also match with the prefix (text before '-') of the namespace
 # field above.
-namePrefix: kb-alert-controller-
+namePrefix: kb-synopsys-operator-
 
 # Labels to add to all resources and selectors.
 #commonLabels:
@@ -21,7 +21,7 @@ bases:
 # [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER'. 'WEBHOOK' components are required.
 #- ../certmanager
 
-patches:
+patchesStrategicMerge:
   # Protect the /metrics endpoint by putting it behind auth.
   # Only one of manager_auth_proxy_patch.yaml and
   # manager_prometheus_metrics_patch.yaml should be enabled.

@@ -1,4 +1,4 @@
-apiVersion: alerts.synopsys.com/v1
+apiVersion: synopsys.com/v1
 kind: Alert
 metadata:
   name: alert-sample
