@@ -51,9 +51,6 @@ import (
 	alertsv1 "github.com/yashbhutwala/kb-synopsys-operator/api/v1"
 
 	scheduler "github.com/yashbhutwala/go-scheduler"
-
-	"github.com/containous/yaegi/interp"
-	"github.com/containous/yaegi/stdlib"
 )
 
 // AlertReconciler reconciles a Alert object
@@ -72,13 +69,6 @@ type VertexInterface struct {
 	Execute func() (ctrl.Result, error)
 }
 
-// +kubebuilder:rbac:groups=alerts.synopsys.com,resources=alerts,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=alerts.synopsys.com,resources=alerts/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=alerts,resources=pods,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=alerts,resources=pods/status,verbs=get
-// +kubebuilder:rbac:groups=alerts,resources=namespaces,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=alerts,resources=services,verbs=get;list;watch;create;update;patch;delete
-
 func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	ctx := context.Background()
 	log := r.Log.WithValues("name and namespace of the alert to reconcile", req.NamespacedName)
@@ -92,43 +82,69 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		return ctrl.Result{}, ignoreNotFound(err)
 	}
 
-	// Dependency Resources from YAML file
-	type RuntimeObjectDependency struct {
-		Obj           string `yaml:"obj"`
-		IsDependentOn string `yaml:"isdependenton"`
+	// 1. Get List of Runtime Objects (Base Yamls)
+	// TODO: either read contents of yaml from locally mounted file
+	// read content of full desired yaml from externally hosted file
+	mapOfKindToDesiredRuntimeObject, mapOfComponentLabelToDesiredRuntimeObject, mapOfKindToMapOfNameToDesiredRuntimeObject, err := r.getRuntimeObjectMaps(alert, log)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-	type RuntimeObjectDepencyYaml struct {
-		MyFunc       string                    `yaml:"myfunc"`
-		Groups       map[string][]string       `yaml:"runtimeobjectsgroupings"`
-		Dependencies []RuntimeObjectDependency `yaml:"runtimeobjectdependencies"`
+
+	// 2. Create Instruction Manual From Runtime Objects
+	instructionManual, err := CreateInstructionManual()
+	if err != nil {
+		return ctrl.Result{}, err
 	}
+
+	// 3. Deploy Resources with Instruction Manual
+	err = r.ScheduleResources(alert, req, mapOfKindToDesiredRuntimeObject, mapOfComponentLabelToDesiredRuntimeObject, mapOfKindToMapOfNameToDesiredRuntimeObject, instructionManual, ctx, log)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// TODO: By adding sha, we no longer need to requeue after (awesome!!), but it's here just in case you need to re-enable it
+	//return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
+	return ctrl.Result{}, nil
+}
+
+// +kubebuilder:rbac:groups=alerts.synopsys.com,resources=alerts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=alerts.synopsys.com,resources=alerts/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=alerts,resources=pods,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=alerts,resources=pods/status,verbs=get
+// +kubebuilder:rbac:groups=alerts,resources=namespaces,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=alerts,resources=services,verbs=get;list;watch;create;update;patch;delete
+
+// Dependency Resources from YAML file
+type RuntimeObjectDependency struct {
+	Obj           string `yaml:"obj"`
+	IsDependentOn string `yaml:"isdependenton"`
+}
+type RuntimeObjectDepencyYaml struct {
+	Groups       map[string][]string       `yaml:"runtimeobjectsgroupings"`
+	Dependencies []RuntimeObjectDependency `yaml:"runtimeobjectdependencies"`
+}
+
+func CreateInstructionManual() (*RuntimeObjectDepencyYaml, error) {
 	// Read Dependcy YAML File into Struct
 	filepath := "/Users/hammer/go/src/github.com/blackducksoftware/kb-synopsys-operator/controllers/alert-dependencies.yaml"
 	dependencyYamlBytes, err := ioutil.ReadFile(filepath)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to read from file %s: %s", filepath, err)
+		return nil, fmt.Errorf("failed to read from file %s: %s", filepath, err)
 	}
 
 	dependencyYamlStruct := &RuntimeObjectDepencyYaml{}
 	err = yaml.Unmarshal(dependencyYamlBytes, dependencyYamlStruct)
 	if err != nil {
-		return ctrl.Result{}, err
+		return nil, err
 	}
-	fmt.Printf("DependencyYamlStruct: %+v\n", dependencyYamlStruct)
-	f := dependencyYamlStruct.MyFunc
-	// fmt.Printf("Func Result: %+v", f)
+	return dependencyYamlStruct, nil
+}
 
-	i := interp.New(interp.Options{})
-	i.Use(stdlib.Symbols)
-	i.Eval(`import "fmt"`)
-	i.Eval(f)
-
-	// TODO: either read contents of yaml from locally mounted file
-	// read content of full desired yaml from externally hosted file
+func (r *AlertReconciler) getRuntimeObjectMaps(alert alertsv1.Alert, log logr.Logger) (map[string][]runtime.Object, map[string][]runtime.Object, map[string]map[string]runtime.Object, error) {
 	content, err := r.httpGet(alert.Spec.FinalYamlUrl)
 	if err != nil {
 		log.Error(err, "HTTPGet failed")
-		return ctrl.Result{}, err
+		return nil, nil, nil, err
 	}
 
 	mapOfKindToDesiredRuntimeObject, mapOfComponentLabelToDesiredRuntimeObject := r.convertYamlFileToRuntimeObjects(content)
@@ -146,7 +162,10 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 			mapOfKindToMapOfNameToDesiredRuntimeObject[kind][key] = item
 		}
 	}
+	return mapOfKindToDesiredRuntimeObject, mapOfComponentLabelToDesiredRuntimeObject, mapOfKindToMapOfNameToDesiredRuntimeObject, nil
+}
 
+func (r *AlertReconciler) ScheduleResources(alert alertsv1.Alert, req ctrl.Request, mapOfKindToDesiredRuntimeObject map[string][]runtime.Object, mapOfComponentLabelToDesiredRuntimeObject map[string][]runtime.Object, mapOfKindToMapOfNameToDesiredRuntimeObject map[string]map[string]runtime.Object, instructionManual *RuntimeObjectDepencyYaml, ctx context.Context, log logr.Logger) error {
 	// Get current runtime objects "owned" by Alert CR
 	fmt.Printf("Creating Tasks for RuntimeObjects...\n")
 	var listOfCurrentRuntimeObjectsOwnedByAlertCr metav1.List
@@ -185,17 +204,17 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		}
 	}
 
-	for _, dependency := range dependencyYamlStruct.Dependencies {
+	for _, dependency := range instructionManual.Dependencies {
 		depTail := dependency.Obj
 		depHead := dependency.IsDependentOn // depTail --> depHead
 		fmt.Printf("Creating Task Dependency: %s -> %s\n", depTail, depHead)
 		// Get all RuntimeObjects for the Tail
-		tailRuntimeObjectIDs, ok := dependencyYamlStruct.Groups[depTail]
+		tailRuntimeObjectIDs, ok := instructionManual.Groups[depTail]
 		if !ok { // no group due to single object name
 			tailRuntimeObjectIDs = []string{depTail}
 		}
 		// Get all RuntimeObjects for the Head
-		headRuntimeObjectIDs, ok := dependencyYamlStruct.Groups[depHead]
+		headRuntimeObjectIDs, ok := instructionManual.Groups[depHead]
 		if !ok { // no group due to single object name
 			headRuntimeObjectIDs = []string{depHead}
 		}
@@ -209,21 +228,9 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	if err := alertScheduler.Run(context.Background()); err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
-	//log.V(1).Info("[STAGE 4]: create all remainder objects")
-	//for label, runtimeObjectList := range mapOfComponentLabelToDesiredRuntimeObject {
-	//	if !strings.EqualFold(label, "cfssl") && !strings.EqualFold(label, "alert") {
-	//		result, err = r.EnsureRuntimeObjects(ctx, log, &alert, runtimeObjectList)
-	//		if err != nil {
-	//			return result, err
-	//		}
-	//	}
-	//}
-
-	// TODO: By adding sha, we no longer need to requeue after (awesome!!), but it's here just in case you need to re-enable it
-	//return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
-	return ctrl.Result{}, nil
+	return nil
 }
 
 func (r *AlertReconciler) httpGet(url string) (content []byte, err error) {
