@@ -69,6 +69,44 @@ type VertexInterface struct {
 	Execute func() (ctrl.Result, error)
 }
 
+func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
+	ctx := context.Background()
+	log := r.Log.WithValues("name and namespace of the alert to reconcile", req.NamespacedName)
+
+	var alert alertsv1.Alert
+	if err := r.Get(ctx, req.NamespacedName, &alert); err != nil {
+		log.Error(err, "unable to fetch Alert")
+		// we'll ignore not-found errors, since they can't be fixed by an immediate
+		// requeue (we'll need to wait for a new notification), and we can get them
+		// on deleted requests.
+		return ctrl.Result{}, ignoreNotFound(err)
+	}
+
+	// 1. Get List of Runtime Objects (Base Yamls)
+	// TODO: either read contents of yaml from locally mounted file
+	// read content of full desired yaml from externally hosted file
+	mapOfKindToDesiredRuntimeObject, mapOfComponentLabelToDesiredRuntimeObject, mapOfKindToMapOfNameToDesiredRuntimeObject, err := r.getRuntimeObjectMaps(alert, log)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// 2. Create Instruction Manual From Runtime Objects
+	instructionManual, err := CreateInstructionManual()
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// 3. Deploy Resources with Instruction Manual
+	err = r.ScheduleResources(alert, req, mapOfKindToDesiredRuntimeObject, mapOfComponentLabelToDesiredRuntimeObject, mapOfKindToMapOfNameToDesiredRuntimeObject, instructionManual, ctx, log)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// TODO: By adding sha, we no longer need to requeue after (awesome!!), but it's here just in case you need to re-enable it
+	//return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
+	return ctrl.Result{}, nil
+}
+
 // +kubebuilder:rbac:groups=alerts.synopsys.com,resources=alerts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=alerts.synopsys.com,resources=alerts/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=alerts,resources=pods,verbs=get;list;watch;create;update;patch;delete
@@ -102,7 +140,13 @@ func CreateInstructionManual() (*RuntimeObjectDepencyYaml, error) {
 	return dependencyYamlStruct, nil
 }
 
-func (r *AlertReconciler) ScheduleResources(alert alertsv1.Alert, req ctrl.Request, content []byte, instructionManual *RuntimeObjectDepencyYaml, ctx context.Context, log logr.Logger) error {
+func (r *AlertReconciler) getRuntimeObjectMaps(alert alertsv1.Alert, log logr.Logger) (map[string][]runtime.Object, map[string][]runtime.Object, map[string]map[string]runtime.Object, error) {
+	content, err := r.httpGet(alert.Spec.FinalYamlUrl)
+	if err != nil {
+		log.Error(err, "HTTPGet failed")
+		return nil, nil, nil, err
+	}
+
 	mapOfKindToDesiredRuntimeObject, mapOfComponentLabelToDesiredRuntimeObject := r.convertYamlFileToRuntimeObjects(content)
 	log.V(1).Info("Parsed the yaml into K8s runtime object", "mapOfKindToDesiredRuntimeObject", mapOfKindToDesiredRuntimeObject, "mapOfComponentLabelToDesiredRuntimeObject", mapOfComponentLabelToDesiredRuntimeObject)
 
@@ -118,7 +162,10 @@ func (r *AlertReconciler) ScheduleResources(alert alertsv1.Alert, req ctrl.Reque
 			mapOfKindToMapOfNameToDesiredRuntimeObject[kind][key] = item
 		}
 	}
+	return mapOfKindToDesiredRuntimeObject, mapOfComponentLabelToDesiredRuntimeObject, mapOfKindToMapOfNameToDesiredRuntimeObject, nil
+}
 
+func (r *AlertReconciler) ScheduleResources(alert alertsv1.Alert, req ctrl.Request, mapOfKindToDesiredRuntimeObject map[string][]runtime.Object, mapOfComponentLabelToDesiredRuntimeObject map[string][]runtime.Object, mapOfKindToMapOfNameToDesiredRuntimeObject map[string]map[string]runtime.Object, instructionManual *RuntimeObjectDepencyYaml, ctx context.Context, log logr.Logger) error {
 	// Get current runtime objects "owned" by Alert CR
 	fmt.Printf("Creating Tasks for RuntimeObjects...\n")
 	var listOfCurrentRuntimeObjectsOwnedByAlertCr metav1.List
@@ -184,45 +231,6 @@ func (r *AlertReconciler) ScheduleResources(alert alertsv1.Alert, req ctrl.Reque
 		return err
 	}
 	return nil
-}
-
-func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
-	ctx := context.Background()
-	log := r.Log.WithValues("name and namespace of the alert to reconcile", req.NamespacedName)
-
-	var alert alertsv1.Alert
-	if err := r.Get(ctx, req.NamespacedName, &alert); err != nil {
-		log.Error(err, "unable to fetch Alert")
-		// we'll ignore not-found errors, since they can't be fixed by an immediate
-		// requeue (we'll need to wait for a new notification), and we can get them
-		// on deleted requests.
-		return ctrl.Result{}, ignoreNotFound(err)
-	}
-
-	// 1. Get List of Runtime Objects (Base Yamls)
-	// TODO: either read contents of yaml from locally mounted file
-	// read content of full desired yaml from externally hosted file
-	content, err := r.httpGet(alert.Spec.FinalYamlUrl)
-	if err != nil {
-		log.Error(err, "HTTPGet failed")
-		return ctrl.Result{}, err
-	}
-
-	// 2. Create Instruction Manual From Runtime Objects
-	instructionManual, err := CreateInstructionManual()
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// 3. Deploy Resources with Instruction Manual
-	err = r.ScheduleResources(alert, req, content, instructionManual, ctx, log)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// TODO: By adding sha, we no longer need to requeue after (awesome!!), but it's here just in case you need to re-enable it
-	//return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
-	return ctrl.Result{}, nil
 }
 
 func (r *AlertReconciler) httpGet(url string) (content []byte, err error) {
