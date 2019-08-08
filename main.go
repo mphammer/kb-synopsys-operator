@@ -19,7 +19,7 @@ import (
 	"flag"
 	"os"
 
-	alertsv1 "github.com/yashbhutwala/kb-synopsys-operator/api/v1"
+	synopsysv1 "github.com/yashbhutwala/kb-synopsys-operator/api/v1"
 	"github.com/yashbhutwala/kb-synopsys-operator/controllers"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -39,7 +39,7 @@ func init() {
 	_ = clientgoscheme.AddToScheme(scheme)
 
 	_ = corev1.AddToScheme(scheme) // we've added this ourselves
-	_ = alertsv1.AddToScheme(scheme)
+	_ = synopsysv1.AddToScheme(scheme)
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -63,12 +63,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	// TODO: wrapper for --enable-alert condition
+	// setting up Alert Controller
 	if err = (&controllers.AlertReconciler{
 		Client: mgr.GetClient(),
 		Log:    ctrl.Log.WithName("controllers").WithName("Alert"),
 		Scheme: mgr.GetScheme(), // we've added this ourselves
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Alert")
+		os.Exit(1)
+	}
+
+	// TODO: wrapper for --enable-blackduck condition
+	// setting up Black Duck Controller
+	if err = (&controllers.BlackduckReconciler{
+		Client: mgr.GetClient(),
+		Log:    ctrl.Log.WithName("controllers").WithName("Blackduck"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Blackduck")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

@@ -1,7 +1,10 @@
 version: "2"
-domain: synopsys.com
+domain: com
 repo: github.com/yashbhutwala/kb-synopsys-operator
 resources:
-- group: alerts
+- group: synopsys
   version: v1
   kind: Alert
+- group: synopsys
+  version: v1
+  kind: Blackduck
