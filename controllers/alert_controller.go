@@ -99,7 +99,8 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	// 4. Deploy Resources with Instruction Manual
-	err = r.ScheduleResources(alert, req, mapOfKindToMapOfNameToDesiredRuntimeObject, instructionManual, ctx, log)
+	//err = r.ScheduleResources(alert, req, mapOfKindToMapOfNameToDesiredRuntimeObject, instructionManual, ctx, log)
+	err = ScheduleResources(alert, req, r.Client, r.Scheme, mapOfKindToMapOfNameToDesiredRuntimeObject, instructionManual, ctx)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -127,6 +128,7 @@ type RuntimeObjectDepencyYaml struct {
 }
 
 func CreateInstructionManual() (*RuntimeObjectDepencyYaml, error) {
+	fmt.Printf("Inside CreateInstructionManual\n")
 	// Read Dependcy YAML File into Struct
 	filepath := "/Users/hammer/go/src/github.com/blackducksoftware/kb-synopsys-operator/controllers/alert-dependencies.yaml"
 	dependencyYamlBytes, err := ioutil.ReadFile(filepath)
