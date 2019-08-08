@@ -98,7 +98,7 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	// 3. Deploy Resources with Instruction Manual
-	err = ScheduleResources(r.Client, r.Scheme, alert, req, mapOfUniqueIdToDesiredRuntimeObject, instructionManual)
+	err = ScheduleResources(r.Client, r.Scheme, alert, mapOfUniqueIdToDesiredRuntimeObject, instructionManual)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -153,13 +153,13 @@ func (r *AlertReconciler) getRuntimeObjectMaps(alert alertsv1.Alert, log logr.Lo
 	return mapOfUniqueIdToDesiredRuntimeObject, nil
 }
 
-func ScheduleResources(myClient client.Client, myScheme *runtime.Scheme, cr alertsv1.Alert, req ctrl.Request, mapOfUniqueIdToDesiredRuntimeObject map[string]runtime.Object, instructionManual *RuntimeObjectDepencyYaml) error {
+func ScheduleResources(myClient client.Client, myScheme *runtime.Scheme, cr alertsv1.Alert, mapOfUniqueIdToDesiredRuntimeObject map[string]runtime.Object, instructionManual *RuntimeObjectDepencyYaml) error {
 	ctx := context.Background()
 	log := ctrl.Log.WithName("MP/YB Library")
 	// Get current runtime objects "owned" by Alert CR
 	fmt.Printf("Creating Tasks for RuntimeObjects...\n")
 	var listOfCurrentRuntimeObjectsOwnedByAlertCr metav1.List
-	if err := myClient.List(ctx, &listOfCurrentRuntimeObjectsOwnedByAlertCr, client.InNamespace(req.Namespace), client.MatchingField(jobOwnerKey, req.Name)); err != nil {
+	if err := myClient.List(ctx, &listOfCurrentRuntimeObjectsOwnedByAlertCr, client.InNamespace(cr.Namespace), client.MatchingField(jobOwnerKey, cr.Name)); err != nil {
 		log.Error(err, "unable to list currentRuntimeObjectsOwnedByAlertCr")
 		//TODO: redo
 		//return ctrl.Result{}, nil
