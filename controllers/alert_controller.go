@@ -85,7 +85,7 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	// 1. Get List of Runtime Objects (Base Yamls)
 	// TODO: either read contents of yaml from locally mounted file
 	// read content of full desired yaml from externally hosted file
-	mapOfComponentLabelToDesiredRuntimeObject, mapOfKindToMapOfNameToDesiredRuntimeObject, err := r.getRuntimeObjectMaps(alert, log)
+	mapOfUniqueIdToDesiredRuntimeObject, err := r.getRuntimeObjectMaps(alert, log)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -97,7 +97,7 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	// 3. Deploy Resources with Instruction Manual
-	err = ScheduleResources(r.Client, r.Scheme, alert, req, mapOfComponentLabelToDesiredRuntimeObject, mapOfKindToMapOfNameToDesiredRuntimeObject, instructionManual, ctx, log)
+	err = ScheduleResources(r.Client, r.Scheme, alert, req, mapOfUniqueIdToDesiredRuntimeObject, instructionManual, ctx, log)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -140,32 +140,20 @@ func CreateInstructionManual() (*RuntimeObjectDepencyYaml, error) {
 	return dependencyYamlStruct, nil
 }
 
-func (r *AlertReconciler) getRuntimeObjectMaps(alert alertsv1.Alert, log logr.Logger) (map[string][]runtime.Object, map[string]map[string]runtime.Object, error) {
+func (r *AlertReconciler) getRuntimeObjectMaps(alert alertsv1.Alert, log logr.Logger) (map[string]runtime.Object, error) {
 	content, err := r.httpGet(alert.Spec.FinalYamlUrl)
 	if err != nil {
 		log.Error(err, "HTTPGet failed")
-		return nil, nil, err
+		return nil, err
 	}
 
-	mapOfKindToDesiredRuntimeObject, mapOfComponentLabelToDesiredRuntimeObject := r.convertYamlFileToRuntimeObjects(content)
-	log.V(1).Info("Parsed the yaml into K8s runtime object", "mapOfComponentLabelToDesiredRuntimeObject", mapOfComponentLabelToDesiredRuntimeObject)
+	mapOfUniqueIdToDesiredRuntimeObject := r.convertYamlFileToRuntimeObjects(content)
+	log.V(1).Info("Parsed the yaml into K8s runtime object", "mapOfUniqueIdToDesiredRuntimeObject", mapOfUniqueIdToDesiredRuntimeObject)
 
-	// TODO: potentially this is what convertYamlFileToRuntimeObjects returns
-	mapOfKindToMapOfNameToDesiredRuntimeObject := make(map[string]map[string]runtime.Object, len(mapOfKindToDesiredRuntimeObject))
-	for kind, listOfRuntimeObjects := range mapOfKindToDesiredRuntimeObject {
-		for _, item := range listOfRuntimeObjects {
-			key := item.(metav1.Object).GetName()
-			// weird golang thing, have to initialize the nested map if it doesn't exist
-			if _, ok := mapOfKindToMapOfNameToDesiredRuntimeObject[kind]; !ok {
-				mapOfKindToMapOfNameToDesiredRuntimeObject[kind] = make(map[string]runtime.Object, 0)
-			}
-			mapOfKindToMapOfNameToDesiredRuntimeObject[kind][key] = item
-		}
-	}
-	return mapOfComponentLabelToDesiredRuntimeObject, mapOfKindToMapOfNameToDesiredRuntimeObject, nil
+	return mapOfUniqueIdToDesiredRuntimeObject, nil
 }
 
-func ScheduleResources(myClient client.Client, myScheme *runtime.Scheme, alert alertsv1.Alert, req ctrl.Request, mapOfComponentLabelToDesiredRuntimeObject map[string][]runtime.Object, mapOfKindToMapOfNameToDesiredRuntimeObject map[string]map[string]runtime.Object, instructionManual *RuntimeObjectDepencyYaml, ctx context.Context, log logr.Logger) error {
+func ScheduleResources(myClient client.Client, myScheme *runtime.Scheme, alert alertsv1.Alert, req ctrl.Request, mapOfUniqueIdToDesiredRuntimeObject map[string]runtime.Object, instructionManual *RuntimeObjectDepencyYaml, ctx context.Context, log logr.Logger) error {
 	// Get current runtime objects "owned" by Alert CR
 	fmt.Printf("Creating Tasks for RuntimeObjects...\n")
 	var listOfCurrentRuntimeObjectsOwnedByAlertCr metav1.List
@@ -177,13 +165,16 @@ func ScheduleResources(myClient client.Client, myScheme *runtime.Scheme, alert a
 
 	// If any of the current objects are not in the desired objects, delete them
 	fmt.Printf("Creating Task Dependencies...\n")
-	for _, currentRuntimeObjectOwnedByAlertCr := range listOfCurrentRuntimeObjectsOwnedByAlertCr.Items {
-		kind := currentRuntimeObjectOwnedByAlertCr.Object.GetObjectKind().GroupVersionKind().Kind
-		uniqueIdentifierRuntimeObject := currentRuntimeObjectOwnedByAlertCr.Object.(runtime.Object)
-		uniqueIdentifier := uniqueIdentifierRuntimeObject.(metav1.Object).GetName()
-		_, ok := mapOfKindToMapOfNameToDesiredRuntimeObject[kind][uniqueIdentifier]
+	accessor := meta.NewAccessor()
+	for _, currentRuntimeRawExtensionOwnedByAlertCr := range listOfCurrentRuntimeObjectsOwnedByAlertCr.Items {
+		currentRuntimeObjectOwnedByAlertCr := currentRuntimeRawExtensionOwnedByAlertCr.Object.(runtime.Object)
+		currentRuntimeObjectKind, _ := accessor.Kind(currentRuntimeObjectOwnedByAlertCr)
+		currentRuntimeObjectName, _ := accessor.Name(currentRuntimeObjectOwnedByAlertCr)
+		currentRuntimeObjectNamespace, _ := accessor.Namespace(currentRuntimeObjectOwnedByAlertCr)
+		uniqueId := fmt.Sprintf("%s.%s.%s", currentRuntimeObjectKind, currentRuntimeObjectNamespace, currentRuntimeObjectName)
+		_, ok := mapOfUniqueIdToDesiredRuntimeObject[uniqueId]
 		if !ok {
-			err := myClient.Delete(ctx, uniqueIdentifierRuntimeObject)
+			err := myClient.Delete(ctx, currentRuntimeObjectOwnedByAlertCr)
 			if err != nil {
 				// if any error in deleting, just continue
 				continue
@@ -193,15 +184,14 @@ func ScheduleResources(myClient client.Client, myScheme *runtime.Scheme, alert a
 
 	alertScheduler := scheduler.New(scheduler.ConcurrentTasks(5))
 	taskMap := make(map[string]*scheduler.Task)
-	for label, listOfRuntimeObjects := range mapOfComponentLabelToDesiredRuntimeObject {
-		for _, runtimeObject := range listOfRuntimeObjects {
-			taskFunc := func(ctx context.Context) error {
-				_, err := EnsureRuntimeObjects(myClient, myScheme, ctx, log, &alert, []runtime.Object{runtimeObject})
-				return err
-			}
-			task := alertScheduler.AddTask(taskFunc)
-			taskMap[label] = task
+	for uniqueId, desiredRuntimeObject := range mapOfUniqueIdToDesiredRuntimeObject {
+		rto := desiredRuntimeObject.DeepCopyObject()
+		taskFunc := func(ctx context.Context) error {
+			_, err := EnsureRuntimeObjects(myClient, myScheme, ctx, log, &alert, rto)
+			return err
 		}
+		task := alertScheduler.AddTask(taskFunc)
+		taskMap[uniqueId] = task
 	}
 
 	for _, dependency := range instructionManual.Dependencies {
@@ -246,71 +236,68 @@ func (r *AlertReconciler) httpGet(url string) (content []byte, err error) {
 	return ioutil.ReadAll(response.Body)
 }
 
-func EnsureRuntimeObjects(myClient client.Client, myScheme *runtime.Scheme, ctx context.Context, log logr.Logger, alert *alertsv1.Alert, listOfDesiredRuntimeObjects []runtime.Object) (ctrl.Result, error) {
-	for _, desiredRuntimeObject := range listOfDesiredRuntimeObjects {
+func EnsureRuntimeObjects(myClient client.Client, myScheme *runtime.Scheme, ctx context.Context, log logr.Logger, alert *alertsv1.Alert, desiredRuntimeObject runtime.Object) (ctrl.Result, error) {
+	// TODO: either get this working or wait for server side apply
+	// TODO: https://github.com/kubernetes-sigs/controller-runtime/issues/347
+	// TODO: https://github.com/kubernetes-sigs/controller-runtime/issues/464
+	// TODO: https://godoc.org/sigs.k8s.io/controller-runtime/pkg/controller/controllerutil#CreateOrUpdate
 
-		// TODO: either get this working or wait for server side apply
-		// TODO: https://github.com/kubernetes-sigs/controller-runtime/issues/347
-		// TODO: https://github.com/kubernetes-sigs/controller-runtime/issues/464
-		// TODO: https://godoc.org/sigs.k8s.io/controller-runtime/pkg/controller/controllerutil#CreateOrUpdate
+	//pointerToDesiredRuntimeObject := &desiredRuntimeObject
+	//copyOfDesiredRuntimeObject := desiredRuntimeObject.DeepCopyObject()
+	//pointerToCopyOfDesiredRuntimeObject := &copyOfDesiredRuntimeObject
+	//opResult, err := ctrl.CreateOrUpdate(ctx, r.Client, *pointerToDesiredRuntimeObject, func() error {
+	//	*pointerToDesiredRuntimeObject = *pointerToCopyOfDesiredRuntimeObject
+	//	// Set an owner reference
+	//	if err := ctrl.SetControllerReference(alert, desiredRuntimeObject.(metav1.Object), r.Scheme); err != nil {
+	//		// Requeue if we cannot set owner on the object
+	//		//return err
+	//		return nil
+	//	}
+	//	return nil
+	//})
 
-		//pointerToDesiredRuntimeObject := &desiredRuntimeObject
-		//copyOfDesiredRuntimeObject := desiredRuntimeObject.DeepCopyObject()
-		//pointerToCopyOfDesiredRuntimeObject := &copyOfDesiredRuntimeObject
-		//opResult, err := ctrl.CreateOrUpdate(ctx, r.Client, *pointerToDesiredRuntimeObject, func() error {
-		//	*pointerToDesiredRuntimeObject = *pointerToCopyOfDesiredRuntimeObject
-		//	// Set an owner reference
-		//	if err := ctrl.SetControllerReference(alert, desiredRuntimeObject.(metav1.Object), r.Scheme); err != nil {
-		//		// Requeue if we cannot set owner on the object
-		//		//return err
-		//		return nil
-		//	}
-		//	return nil
-		//})
+	// set an owner reference
+	if err := ctrl.SetControllerReference(alert, desiredRuntimeObject.(metav1.Object), myScheme); err != nil {
+		// requeue if we cannot set owner on the object
+		// TODO: change this to requeue, and only not requeue when we get "newAlreadyOwnedError", i.e: if it's already owned by our CR
+		//return ctrl.Result{}, err
+		return ctrl.Result{}, nil
+	}
 
-		// set an owner reference
-		if err := ctrl.SetControllerReference(alert, desiredRuntimeObject.(metav1.Object), myScheme); err != nil {
-			// requeue if we cannot set owner on the object
-			// TODO: change this to requeue, and only not requeue when we get "newAlreadyOwnedError", i.e: if it's already owned by our CR
-			//return ctrl.Result{}, err
-			return ctrl.Result{}, nil
-		}
+	var opResult controllerutil.OperationResult
+	key, err := client.ObjectKeyFromObject(desiredRuntimeObject)
+	if err != nil {
+		opResult = controllerutil.OperationResultNone
+	}
 
-		var opResult controllerutil.OperationResult
-		key, err := client.ObjectKeyFromObject(desiredRuntimeObject)
-		if err != nil {
+	currentRuntimeObject := desiredRuntimeObject.DeepCopyObject()
+	if err := myClient.Get(ctx, key, currentRuntimeObject); err != nil {
+		if !apierrs.IsNotFound(err) {
 			opResult = controllerutil.OperationResultNone
 		}
-
-		currentRuntimeObject := desiredRuntimeObject.DeepCopyObject()
-		if err := myClient.Get(ctx, key, currentRuntimeObject); err != nil {
-			if !apierrs.IsNotFound(err) {
-				opResult = controllerutil.OperationResultNone
-			}
-			if err := myClient.Create(ctx, desiredRuntimeObject); err != nil {
-				opResult = controllerutil.OperationResultNone
-			}
-			opResult = controllerutil.OperationResultCreated
-		}
-
-		existing := currentRuntimeObject
-		if reflect.DeepEqual(existing, desiredRuntimeObject) {
+		if err := myClient.Create(ctx, desiredRuntimeObject); err != nil {
 			opResult = controllerutil.OperationResultNone
 		}
+		opResult = controllerutil.OperationResultCreated
+	}
 
-		if err := myClient.Update(ctx, desiredRuntimeObject); err != nil {
-			opResult = controllerutil.OperationResultNone
-		}
+	existing := currentRuntimeObject
+	if reflect.DeepEqual(existing, desiredRuntimeObject) {
+		opResult = controllerutil.OperationResultNone
+	}
 
-		log.V(1).Info("Result of CreateOrUpdate on CFSSL desiredRuntimeObject", "desiredRuntimeObject", desiredRuntimeObject, "opResult", opResult)
+	if err := myClient.Update(ctx, desiredRuntimeObject); err != nil {
+		opResult = controllerutil.OperationResultNone
+	}
 
-		// TODO: Case 1: we needed to update the configMap and now we should delete and redploy objects in STAGE 3, 4 ...
-		// TODO: Case 2: we failed to update the configMap...TODO
-		if err != nil {
-			// TODO: delete everything in stages 3, 4 ... and requeue
-			log.Error(err, "unable to create or update STAGE 2 objects, deleting all child Objects", "desiredRuntimeObject", desiredRuntimeObject)
-			return ctrl.Result{}, err
-		}
+	log.V(1).Info("Result of CreateOrUpdate on CFSSL desiredRuntimeObject", "desiredRuntimeObject", desiredRuntimeObject, "opResult", opResult)
+
+	// TODO: Case 1: we needed to update the configMap and now we should delete and redploy objects in STAGE 3, 4 ...
+	// TODO: Case 2: we failed to update the configMap...TODO
+	if err != nil {
+		// TODO: delete everything in stages 3, 4 ... and requeue
+		log.Error(err, "unable to create or update STAGE 2 objects, deleting all child Objects", "desiredRuntimeObject", desiredRuntimeObject)
+		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
 }
@@ -323,13 +310,12 @@ func ignoreNotFound(err error) error {
 	return err
 }
 
-func (r *AlertReconciler) convertYamlFileToRuntimeObjects(fileR []byte) (map[string][]runtime.Object, map[string][]runtime.Object) {
+func (r *AlertReconciler) convertYamlFileToRuntimeObjects(fileR []byte) map[string]runtime.Object {
 
 	//acceptedK8sTypes := regexp.MustCompile(`(Role|ClusterRole|RoleBinding|ClusterRoleBinding|ServiceAccount|ConfigMap)`)
 	fileAsString := string(fileR[:])
 	listOfSingleK8sResourceYaml := strings.Split(fileAsString, "---")
-	kindRuntimeObjectMap := make(map[string][]runtime.Object, 0)
-	labelComponentRuntimeObjectMap := make(map[string][]runtime.Object, 0)
+	mapOfUniqueIdToDesiredRuntimeObject := make(map[string]runtime.Object, 0)
 
 	for _, singleYaml := range listOfSingleK8sResourceYaml {
 		if singleYaml == "\n" || singleYaml == "" {
@@ -342,7 +328,6 @@ func (r *AlertReconciler) convertYamlFileToRuntimeObjects(fileR []byte) (map[str
 			r.Log.V(1).Info("unable to decode a single yaml object, skipping", "singleYaml", singleYaml)
 			continue
 		}
-		kindRuntimeObjectMap[groupVersionKind.Kind] = append(kindRuntimeObjectMap[groupVersionKind.Kind], runtimeObject)
 		//if !acceptedK8sTypes.MatchString(groupVersionKind.Kind) {
 		//	log.Printf("The custom-roles configMap contained K8s object types which are not supported! Skipping object with type: %s", groupVersionKind.Kind)
 		//}
@@ -354,7 +339,7 @@ func (r *AlertReconciler) convertYamlFileToRuntimeObjects(fileR []byte) (map[str
 		// 	r.Log.V(1).Info("unable to get labels for a k8s object, skipping", "runtimeObject", runtimeObject)
 		// 	continue
 		// }
-		// labelComponentRuntimeObjectMap[labels["component"]] = append(labelComponentRuntimeObjectMap[labels["component"]], runtimeObject)
+		// mapOfUniqueIdToDesiredRuntimeObject[labels["component"]] = append(mapOfUniqueIdToDesiredRuntimeObject[labels["component"]], runtimeObject)
 		// ABOVE -- Old Label Code
 		// BELOW - New Unique Label Code
 		runtimeObjectKind := groupVersionKind.Kind
@@ -368,12 +353,12 @@ func (r *AlertReconciler) convertYamlFileToRuntimeObjects(fileR []byte) (map[str
 			fmt.Printf("Failed to get runtimeObject's namespace: %s", err)
 			continue
 		}
-		label := fmt.Sprintf("%s.%s.%s", runtimeObjectKind, runtimeObjectNamespace, runtimeObjectName)
-		fmt.Printf("Creating RuntimeObject Label: %s\n", label)
-		labelComponentRuntimeObjectMap[label] = append(labelComponentRuntimeObjectMap[label], runtimeObject)
+		uniqueId := fmt.Sprintf("%s.%s.%s", runtimeObjectKind, runtimeObjectNamespace, runtimeObjectName)
+		fmt.Printf("Creating RuntimeObject Label: %s\n", uniqueId)
+		mapOfUniqueIdToDesiredRuntimeObject[uniqueId] = runtimeObject
 		// ABOVE - New Unique Label Code
 	}
-	return kindRuntimeObjectMap, labelComponentRuntimeObjectMap
+	return mapOfUniqueIdToDesiredRuntimeObject
 }
 
 func (r *AlertReconciler) SetIndexingForChildrenObjects(mgr ctrl.Manager, ro runtime.Object) error {
