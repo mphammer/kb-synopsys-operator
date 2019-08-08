@@ -98,7 +98,7 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	// 3. Deploy Resources with Instruction Manual
-	err = ScheduleResources(r.Client, r.Scheme, alert, req, mapOfUniqueIdToDesiredRuntimeObject, instructionManual, ctx, log)
+	err = ScheduleResources(r.Client, r.Scheme, alert, req, mapOfUniqueIdToDesiredRuntimeObject, instructionManual)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -153,7 +153,9 @@ func (r *AlertReconciler) getRuntimeObjectMaps(alert alertsv1.Alert, log logr.Lo
 	return mapOfUniqueIdToDesiredRuntimeObject, nil
 }
 
-func ScheduleResources(myClient client.Client, myScheme *runtime.Scheme, alert alertsv1.Alert, req ctrl.Request, mapOfUniqueIdToDesiredRuntimeObject map[string]runtime.Object, instructionManual *RuntimeObjectDepencyYaml, ctx context.Context, log logr.Logger) error {
+func ScheduleResources(myClient client.Client, myScheme *runtime.Scheme, cr alertsv1.Alert, req ctrl.Request, mapOfUniqueIdToDesiredRuntimeObject map[string]runtime.Object, instructionManual *RuntimeObjectDepencyYaml) error {
+	ctx := context.Background()
+	log := ctrl.Log.WithName("MP/YB Library")
 	// Get current runtime objects "owned" by Alert CR
 	fmt.Printf("Creating Tasks for RuntimeObjects...\n")
 	var listOfCurrentRuntimeObjectsOwnedByAlertCr metav1.List
@@ -187,7 +189,7 @@ func ScheduleResources(myClient client.Client, myScheme *runtime.Scheme, alert a
 	for uniqueId, desiredRuntimeObject := range mapOfUniqueIdToDesiredRuntimeObject {
 		rto := desiredRuntimeObject.DeepCopyObject()
 		taskFunc := func(ctx context.Context) error {
-			_, err := EnsureRuntimeObjects(myClient, myScheme, ctx, log, &alert, rto)
+			_, err := EnsureRuntimeObjects(myClient, myScheme, ctx, log, &cr, rto)
 			return err
 		}
 		task := alertScheduler.AddTask(taskFunc)
@@ -236,7 +238,7 @@ func httpGet(url string) (content []byte, err error) {
 	return ioutil.ReadAll(response.Body)
 }
 
-func EnsureRuntimeObjects(myClient client.Client, myScheme *runtime.Scheme, ctx context.Context, log logr.Logger, alert *alertsv1.Alert, desiredRuntimeObject runtime.Object) (ctrl.Result, error) {
+func EnsureRuntimeObjects(myClient client.Client, myScheme *runtime.Scheme, ctx context.Context, log logr.Logger, cr *alertsv1.Alert, desiredRuntimeObject runtime.Object) (ctrl.Result, error) {
 	// TODO: either get this working or wait for server side apply
 	// TODO: https://github.com/kubernetes-sigs/controller-runtime/issues/347
 	// TODO: https://github.com/kubernetes-sigs/controller-runtime/issues/464
@@ -248,7 +250,7 @@ func EnsureRuntimeObjects(myClient client.Client, myScheme *runtime.Scheme, ctx 
 	//opResult, err := ctrl.CreateOrUpdate(ctx, r.Client, *pointerToDesiredRuntimeObject, func() error {
 	//	*pointerToDesiredRuntimeObject = *pointerToCopyOfDesiredRuntimeObject
 	//	// Set an owner reference
-	//	if err := ctrl.SetControllerReference(alert, desiredRuntimeObject.(metav1.Object), r.Scheme); err != nil {
+	//	if err := ctrl.SetControllerReference(cr, desiredRuntimeObject.(metav1.Object), r.Scheme); err != nil {
 	//		// Requeue if we cannot set owner on the object
 	//		//return err
 	//		return nil
@@ -257,7 +259,7 @@ func EnsureRuntimeObjects(myClient client.Client, myScheme *runtime.Scheme, ctx 
 	//})
 
 	// set an owner reference
-	if err := ctrl.SetControllerReference(alert, desiredRuntimeObject.(metav1.Object), myScheme); err != nil {
+	if err := ctrl.SetControllerReference(cr, desiredRuntimeObject.(metav1.Object), myScheme); err != nil {
 		// requeue if we cannot set owner on the object
 		// TODO: change this to requeue, and only not requeue when we get "newAlreadyOwnedError", i.e: if it's already owned by our CR
 		//return ctrl.Result{}, err
