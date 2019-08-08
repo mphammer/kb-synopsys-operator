@@ -19,6 +19,8 @@ import (
 	"context"
 	"github.com/go-logr/logr"
 	alertsv1 "github.com/yashbhutwala/kb-synopsys-operator/api/v1"
+	"github.com/yashbhutwala/kb-synopsys-operator/controllers/controllers_utils"
+	"github.com/yashbhutwala/kb-synopsys-operator/flying-dutchman"
 	corev1 "k8s.io/api/core/v1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,8 +37,7 @@ type AlertReconciler struct {
 }
 
 var (
-	jobOwnerKey = ".metadata.controller"
-	apiGVStr    = alertsv1.GroupVersion.String()
+	ApiGVStr = alertsv1.GroupVersion.String()
 )
 
 func (r *AlertReconciler) GetClient() client.Client {
@@ -64,12 +65,12 @@ func (r *AlertReconciler) GetRuntimeObjects(cr interface{}) (map[string]runtime.
 	// 1. Get List of Runtime Objects (Base Yamls)
 	// TODO: either read contents of yaml from locally mounted file
 	// read content of full desired yaml from externally hosted file
-	byteArrayContentFromFile, err := HttpGet(alert.Spec.FinalYamlUrl)
+	byteArrayContentFromFile, err := controllers_utils.HttpGet(alert.Spec.FinalYamlUrl)
 	if err != nil {
 		return nil, err
 	}
 
-	mapOfUniqueIdToDesiredRuntimeObject := ConvertYamlFileToRuntimeObjects(byteArrayContentFromFile)
+	mapOfUniqueIdToDesiredRuntimeObject := controllers_utils.ConvertYamlFileToRuntimeObjects(byteArrayContentFromFile)
 	for _, desiredRuntimeObject := range mapOfUniqueIdToDesiredRuntimeObject {
 		// set an owner reference
 		if err := ctrl.SetControllerReference(alert, desiredRuntimeObject.(metav1.Object), r.Scheme); err != nil {
@@ -82,10 +83,10 @@ func (r *AlertReconciler) GetRuntimeObjects(cr interface{}) (map[string]runtime.
 	return mapOfUniqueIdToDesiredRuntimeObject, nil
 }
 
-func (r *AlertReconciler) CreateInstructionManual() (*RuntimeObjectDepencyYaml, error) {
+func (r *AlertReconciler) CreateInstructionManual() (*flying_dutchman.RuntimeObjectDepencyYaml, error) {
 	// 2. Create Instruction Manual From Runtime Objects
 	instructionManualFile := "https://raw.githubusercontent.com/yashbhutwala/kb-synopsys-operator/master/controllers/alert-dependencies.yaml"
-	instructionManual, err := CreateInstructionManual(instructionManualFile)
+	instructionManual, err := controllers_utils.CreateInstructionManual(instructionManualFile)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +100,7 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	// TODO: By adding sha, we no longer need to requeue after (awesome!!), but it's here just in case you need to re-enable it
 	//return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
 	//return ctrl.Result{}, nil
-	return Reconcile2(req, r)
+	return flying_dutchman.MetaReconciler(req, r)
 }
 
 // +kubebuilder:rbac:groups=alerts.synopsys.com,resources=alerts,verbs=get;list;watch;create;update;patch;delete
@@ -110,14 +111,14 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 // +kubebuilder:rbac:groups=alerts,resources=services,verbs=get;list;watch;create;update;patch;delete
 
 func (r *AlertReconciler) SetIndexingForChildrenObjects(mgr ctrl.Manager, ro runtime.Object) error {
-	if err := mgr.GetFieldIndexer().IndexField(ro, jobOwnerKey, func(rawObj runtime.Object) []string {
+	if err := mgr.GetFieldIndexer().IndexField(ro, flying_dutchman.JobOwnerKey, func(rawObj runtime.Object) []string {
 		// grab the job object, extract the owner...
 		owner := metav1.GetControllerOf(ro.(metav1.Object))
 		if owner == nil {
 			return nil
 		}
 		// ...make sure it's a Alert...
-		if owner.APIVersion != apiGVStr || owner.Kind != "Alert" {
+		if owner.APIVersion != ApiGVStr || owner.Kind != "Alert" {
 			return nil
 		}
 

@@ -1,4 +1,4 @@
-package controllers
+package flying_dutchman
 
 import (
 	"context"
@@ -15,24 +15,28 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-type ReconcileInterface interface {
+var (
+	JobOwnerKey = ".metadata.controller"
+)
+
+type MetaReconcilerInterface interface {
 	GetClient() client.Client
 	GetCustomResource(ctrl.Request) (metav1.Object, error)
 	GetRuntimeObjects(interface{}) (map[string]runtime.Object, error)
 	CreateInstructionManual() (*RuntimeObjectDepencyYaml, error)
 }
 
-func Reconcile2(req ctrl.Request, ri ReconcileInterface) (ctrl.Result, error) {
-	myClient := ri.GetClient()
-	cr, err := ri.GetCustomResource(req)
+func MetaReconciler(req ctrl.Request, mri MetaReconcilerInterface) (ctrl.Result, error) {
+	myClient := mri.GetClient()
+	cr, err := mri.GetCustomResource(req)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	mapOfUniqueIdToDesiredRuntimeObject, err := ri.GetRuntimeObjects(cr)
+	mapOfUniqueIdToDesiredRuntimeObject, err := mri.GetRuntimeObjects(cr)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	instructionManual, err := ri.CreateInstructionManual()
+	instructionManual, err := mri.CreateInstructionManual()
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -50,7 +54,7 @@ func ScheduleResources(myClient client.Client, cr metav1.Object, mapOfUniqueIdTo
 	// Get current runtime objects "owned" by Alert CR
 	fmt.Printf("Creating Tasks for RuntimeObjects...\n")
 	var listOfCurrentRuntimeObjectsOwnedByAlertCr metav1.List
-	if err := myClient.List(ctx, &listOfCurrentRuntimeObjectsOwnedByAlertCr, client.InNamespace(cr.GetNamespace()), client.MatchingField(jobOwnerKey, cr.GetName())); err != nil {
+	if err := myClient.List(ctx, &listOfCurrentRuntimeObjectsOwnedByAlertCr, client.InNamespace(cr.GetNamespace()), client.MatchingField(JobOwnerKey, cr.GetName())); err != nil {
 		log.Error(err, "unable to list currentRuntimeObjectsOwnedByAlertCr")
 		//TODO: redo
 		//return ctrl.Result{}, nil
