@@ -185,7 +185,7 @@ func (r *AlertReconciler) ScheduleResources(alert alertsv1.Alert, req ctrl.Reque
 
 	log.V(1).Info("mapOfUniqueIdToDesiredRuntimeObject:", "mapOfUniqueIdToDesiredRuntimeObject", mapOfUniqueIdToDesiredRuntimeObject)
 
-	alertScheduler := scheduler.New(scheduler.ConcurrentTasks(3))
+	alertScheduler := scheduler.New(scheduler.ConcurrentTasks(1))
 	taskMap := make(map[string]*scheduler.Task)
 	for label, runtimeObject := range mapOfUniqueIdToDesiredRuntimeObject {
 		taskFunc := func(ctx context.Context) error {
