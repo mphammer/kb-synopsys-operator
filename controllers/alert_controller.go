@@ -85,7 +85,7 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	// 1. Get List of Runtime Objects (Base Yamls)
 	// TODO: either read contents of yaml from locally mounted file
 	// read content of full desired yaml from externally hosted file
-	mapOfUniqueIdToDesiredRuntimeObject, err := r.getRuntimeObjectMaps(alert, log)
+	mapOfUniqueIdToDesiredRuntimeObject, err := r.getRuntimeObjectMaps(alert, log, r.Scheme)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -98,7 +98,7 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	// 3. Deploy Resources with Instruction Manual
-	err = ScheduleResources(r.Client, r.Scheme, alert, mapOfUniqueIdToDesiredRuntimeObject, instructionManual)
+	err = ScheduleResources(r.Client, alert.GetObjectMeta(), mapOfUniqueIdToDesiredRuntimeObject, instructionManual)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -140,7 +140,7 @@ func CreateInstructionManual(instructionManualLocation string) (*RuntimeObjectDe
 	return dependencyYamlStruct, nil
 }
 
-func (r *AlertReconciler) getRuntimeObjectMaps(alert alertsv1.Alert, log logr.Logger) (map[string]runtime.Object, error) {
+func (r *AlertReconciler) getRuntimeObjectMaps(alert alertsv1.Alert, log logr.Logger, myScheme *runtime.Scheme) (map[string]runtime.Object, error) {
 	content, err := httpGet(alert.Spec.FinalYamlUrl)
 	if err != nil {
 		log.Error(err, "HTTPGet failed")
@@ -150,16 +150,27 @@ func (r *AlertReconciler) getRuntimeObjectMaps(alert alertsv1.Alert, log logr.Lo
 	mapOfUniqueIdToDesiredRuntimeObject := r.convertYamlFileToRuntimeObjects(content)
 	log.V(1).Info("Parsed the yaml into K8s runtime object", "mapOfUniqueIdToDesiredRuntimeObject", mapOfUniqueIdToDesiredRuntimeObject)
 
+	for _, desiredRuntimeObject := range mapOfUniqueIdToDesiredRuntimeObject {
+		// set an owner reference
+		if err := ctrl.SetControllerReference(&alert, desiredRuntimeObject.(metav1.Object), myScheme); err != nil {
+			// requeue if we cannot set owner on the object
+			// TODO: change this to requeue, and only not requeue when we get "newAlreadyOwnedError", i.e: if it's already owned by our CR
+			//return ctrl.Result{}, err
+			//return ctrl.Result{}, nil
+			//return nil, err
+		}
+	}
+
 	return mapOfUniqueIdToDesiredRuntimeObject, nil
 }
 
-func ScheduleResources(myClient client.Client, myScheme *runtime.Scheme, cr alertsv1.Alert, mapOfUniqueIdToDesiredRuntimeObject map[string]runtime.Object, instructionManual *RuntimeObjectDepencyYaml) error {
+func ScheduleResources(myClient client.Client, cr metav1.Object, mapOfUniqueIdToDesiredRuntimeObject map[string]runtime.Object, instructionManual *RuntimeObjectDepencyYaml) error {
 	ctx := context.Background()
 	log := ctrl.Log.WithName("MP/YB Library")
 	// Get current runtime objects "owned" by Alert CR
 	fmt.Printf("Creating Tasks for RuntimeObjects...\n")
 	var listOfCurrentRuntimeObjectsOwnedByAlertCr metav1.List
-	if err := myClient.List(ctx, &listOfCurrentRuntimeObjectsOwnedByAlertCr, client.InNamespace(cr.Namespace), client.MatchingField(jobOwnerKey, cr.Name)); err != nil {
+	if err := myClient.List(ctx, &listOfCurrentRuntimeObjectsOwnedByAlertCr, client.InNamespace(cr.GetNamespace()), client.MatchingField(jobOwnerKey, cr.GetName())); err != nil {
 		log.Error(err, "unable to list currentRuntimeObjectsOwnedByAlertCr")
 		//TODO: redo
 		//return ctrl.Result{}, nil
@@ -189,7 +200,7 @@ func ScheduleResources(myClient client.Client, myScheme *runtime.Scheme, cr aler
 	for uniqueId, desiredRuntimeObject := range mapOfUniqueIdToDesiredRuntimeObject {
 		rto := desiredRuntimeObject.DeepCopyObject()
 		taskFunc := func(ctx context.Context) error {
-			_, err := EnsureRuntimeObjects(myClient, myScheme, ctx, log, &cr, rto)
+			_, err := EnsureRuntimeObjects(myClient, ctx, log, rto)
 			return err
 		}
 		task := alertScheduler.AddTask(taskFunc)
@@ -238,7 +249,7 @@ func httpGet(url string) (content []byte, err error) {
 	return ioutil.ReadAll(response.Body)
 }
 
-func EnsureRuntimeObjects(myClient client.Client, myScheme *runtime.Scheme, ctx context.Context, log logr.Logger, cr *alertsv1.Alert, desiredRuntimeObject runtime.Object) (ctrl.Result, error) {
+func EnsureRuntimeObjects(myClient client.Client, ctx context.Context, log logr.Logger, desiredRuntimeObject runtime.Object) (ctrl.Result, error) {
 	// TODO: either get this working or wait for server side apply
 	// TODO: https://github.com/kubernetes-sigs/controller-runtime/issues/347
 	// TODO: https://github.com/kubernetes-sigs/controller-runtime/issues/464
@@ -257,14 +268,6 @@ func EnsureRuntimeObjects(myClient client.Client, myScheme *runtime.Scheme, ctx 
 	//	}
 	//	return nil
 	//})
-
-	// set an owner reference
-	if err := ctrl.SetControllerReference(cr, desiredRuntimeObject.(metav1.Object), myScheme); err != nil {
-		// requeue if we cannot set owner on the object
-		// TODO: change this to requeue, and only not requeue when we get "newAlreadyOwnedError", i.e: if it's already owned by our CR
-		//return ctrl.Result{}, err
-		return ctrl.Result{}, nil
-	}
 
 	var opResult controllerutil.OperationResult
 	key, err := client.ObjectKeyFromObject(desiredRuntimeObject)
