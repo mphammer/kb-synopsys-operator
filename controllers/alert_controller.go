@@ -37,7 +37,7 @@ type AlertReconciler struct {
 }
 
 var (
-	ApiGVStr = alertsv1.GroupVersion.String()
+	apiGVStr = alertsv1.GroupVersion.String()
 )
 
 func (r *AlertReconciler) GetClient() client.Client {
@@ -99,7 +99,6 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 
 	// TODO: By adding sha, we no longer need to requeue after (awesome!!), but it's here just in case you need to re-enable it
 	//return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
-	//return ctrl.Result{}, nil
 	return flying_dutchman.MetaReconciler(req, r)
 }
 
@@ -118,7 +117,7 @@ func (r *AlertReconciler) SetIndexingForChildrenObjects(mgr ctrl.Manager, ro run
 			return nil
 		}
 		// ...make sure it's a Alert...
-		if owner.APIVersion != ApiGVStr || owner.Kind != "Alert" {
+		if owner.APIVersion != apiGVStr || owner.Kind != "Alert" {
 			return nil
 		}
 
