@@ -91,7 +91,8 @@ func (r *AlertReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	// 2. Create Instruction Manual From Runtime Objects
-	instructionManual, err := CreateInstructionManual()
+	inctructionManualLocation := "https://raw.githubusercontent.com/yashbhutwala/kb-synopsys-operator/master/controllers/alert-dependencies.yaml"
+	instructionManual, err := CreateInstructionManual(inctructionManualLocation)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -124,12 +125,11 @@ type RuntimeObjectDepencyYaml struct {
 	Dependencies []RuntimeObjectDependency `yaml:"runtimeobjectdependencies"`
 }
 
-func CreateInstructionManual() (*RuntimeObjectDepencyYaml, error) {
+func CreateInstructionManual(instructionManualLocation string) (*RuntimeObjectDepencyYaml, error) {
 	// Read Dependcy YAML File into Struct
-	filepath := "/Users/bhutwala/gocode/src/github.com/yashbhutwala/kb-synopsys-operator/controllers/alert-dependencies.yaml"
-	dependencyYamlBytes, err := ioutil.ReadFile(filepath)
+	dependencyYamlBytes, err := httpGet(instructionManualLocation)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read from file %s: %s", filepath, err)
+		return nil, err
 	}
 
 	dependencyYamlStruct := &RuntimeObjectDepencyYaml{}
@@ -141,7 +141,7 @@ func CreateInstructionManual() (*RuntimeObjectDepencyYaml, error) {
 }
 
 func (r *AlertReconciler) getRuntimeObjectMaps(alert alertsv1.Alert, log logr.Logger) (map[string]runtime.Object, error) {
-	content, err := r.httpGet(alert.Spec.FinalYamlUrl)
+	content, err := httpGet(alert.Spec.FinalYamlUrl)
 	if err != nil {
 		log.Error(err, "HTTPGet failed")
 		return nil, err
@@ -223,7 +223,7 @@ func ScheduleResources(myClient client.Client, myScheme *runtime.Scheme, alert a
 	return nil
 }
 
-func (r *AlertReconciler) httpGet(url string) (content []byte, err error) {
+func httpGet(url string) (content []byte, err error) {
 	response, err := http.Get(url)
 	if err != nil {
 		return
