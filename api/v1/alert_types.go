@@ -24,10 +24,34 @@ import (
 
 // AlertSpec defines the desired state of Alert
 type AlertSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
-	FinalYamlUrl   string `json:"finalYamlUrl"`
-	ShaOfFinalYaml string `json:"shaOfFinalYaml"`
+	Namespace         string   `json:"namespace,omitempty"`
+	Size              string   `json:"size"`
+	AlertImage        string   `json:"alertImage,omitempty"`
+	CfsslImage        string   `json:"cfsslImage,omitempty"`
+	ExposeService     string   `json:"exposeService"`
+	StandAlone        *bool    `json:"standAlone"`
+	Port              *int32   `json:"port"`
+	Environs          []string `json:"environs,omitempty"`
+	Secrets           []string `json:"secrets,omitempty"`
+	PersistentStorage bool     `json:"persistentStorage"`
+	PVCName           string   `json:"pvcName"`
+	PVCStorageClass   string   `json:"pvcStorageClass"`
+
+	// Should be passed like: e.g "1300Mi"
+	PVCSize               string                `json:"pvcSize"`
+	AlertMemory           string                `json:"alertMemory,omitempty"`
+	CfsslMemory           string                `json:"cfsslMemory,omitempty"`
+	DesiredState          string                `json:"desiredState,omitempty"`
+	ImageRegistries       []string              `json:"imageRegistries,omitempty"`
+	RegistryConfiguration RegistryConfiguration `json:"registryConfiguration,omitempty"`
+}
+
+// RegistryConfiguration contains the registry configuration
+type RegistryConfiguration struct {
+	Registry    string   `json:"registry"`
+	Namespace   string   `json:"namespace"`
+	PullSecrets []string `json:"pullSecrets"`
 }
 
 // AlertStatus defines the observed state of Alert
